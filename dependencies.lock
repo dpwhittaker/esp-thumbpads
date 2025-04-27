@@ -1,0 +1,111 @@
+dependencies:
+  esp_lcd_sh8601:
+    dependencies: []
+    source:
+      path: D:\Projects\esp\waveshare\thumbpads\components\esp_lcd_sh8601
+      type: local
+    version: 1.0.0
+  espressif/cmake_utilities:
+    component_hash: 351350613ceafba240b761b4ea991e0f231ac7a9f59a9ee901f751bddc0bb18f
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.1'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 0.5.3
+  espressif/esp_io_expander:
+    component_hash: fbc0de4082fc7c207dc98a93a0ed83d1a929a4ecee83cc567afb406f3ee6d4a6
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.4.2'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.0.1
+  espressif/esp_io_expander_tca9554:
+    component_hash: e9e49ddb1038c2b54b13c51b5e3e6dbdd10a878959c8ab0e0a7c8206316add61
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.4.2'
+    - name: espressif/esp_io_expander
+      registry_url: https://components.espressif.com
+      require: private
+      version: ^1.0.1
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.0.1
+  espressif/esp_lcd_touch:
+    dependencies: []
+    source:
+      path: D:\Projects\esp\waveshare\thumbpads\components\espressif__esp_lcd_touch
+      type: local
+    version: 1.1.1
+  espressif/esp_lcd_touch_ft5x06:
+    dependencies: []
+    source:
+      path: D:\Projects\esp\waveshare\thumbpads\components\espressif__esp_lcd_touch_ft5x06
+      type: local
+    version: 1.0.6
+  h2zero/esp-nimble-cpp:
+    component_hash: 82f654989d6e7a82744e32af78fd796d02c545a1728f35d165f4dacd4fcc3663
+    dependencies:
+    - name: espressif/esp_hosted
+      registry_url: https://components.espressif.com
+      require: private
+      rules:
+      - if: target in [esp32p4]
+      version: '*'
+    - name: espressif/esp_wifi_remote
+      registry_url: https://components.espressif.com
+      require: private
+      rules:
+      - if: target in [esp32p4]
+      version: <0.5.4
+    - name: idf
+      require: private
+      rules:
+      - if: target in [esp32p4]
+      version: '>=5.3.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 2.2.1
+  idf:
+    source:
+      type: idf
+    version: 5.4.1
+  joltwallet/littlefs:
+    component_hash: 34b8c56a14f10b440845fe972ce34ef41d1d205bcb139b3dfc58983a10abf59b
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.19.1
+  lvgl/lvgl:
+    component_hash: d7c1ac037ae6e85d94897f807d6e7ba0946a83e720074fc95a4f6241da9f9f53
+    dependencies: []
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 8.4.0
+direct_dependencies:
+- esp_lcd_sh8601
+- espressif/cmake_utilities
+- espressif/esp_io_expander_tca9554
+- espressif/esp_lcd_touch
+- espressif/esp_lcd_touch_ft5x06
+- h2zero/esp-nimble-cpp
+- idf
+- joltwallet/littlefs
+- lvgl/lvgl
+manifest_hash: 9c77b69217666e91155fe2b3104e46fb38bc7a43f04219b578d6190255d5ee3d
+target: esp32s3
+version: 2.0.0
