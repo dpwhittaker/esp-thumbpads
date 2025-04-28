@@ -18,6 +18,10 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_littlefs.h" // Added for LittleFS
+#include "esp_wifi.h"
+#include "esp_now.h"
+#include "esp_random.h"
+#include "esp_mac.h"
 
 #include "lvgl.h"
 #include "esp_lcd_sh8601.h"
@@ -25,9 +29,17 @@
 
 #include "esp_io_expander_tca9554.h"
 
-#include "ble_hid_keyboard.h"
-#include "HIDKeyboardTypes.h"
-#include "HIDTypes.h"
+extern "C" {
+    #include "esp_bt.h"
+    #include "esp_gap_ble_api.h"
+    #include "esp_gatts_api.h"
+    #include "esp_gatt_defs.h"
+    #include "esp_bt_main.h"
+    #include "esp_bt_device.h"
+    #include "nvs_flash.h" // Already included, but ensure it's here for BLE context
+    #include "esp_hidd_prf_api.h"
+    #include "hid_dev.h" // Includes keycodes like HID_KEY_DELETE
+}
 
 static const char *TAG = "example";
 static SemaphoreHandle_t lvgl_mux = NULL;
@@ -38,7 +50,7 @@ static SemaphoreHandle_t lvgl_mux = NULL;
 // --- Filesystem Configuration ---
 #define FS_PARTITION_LABEL "storage"
 #define FS_BASE_PATH "/fs"
-#define KEYBOARD_LAYOUT_FILE FS_BASE_PATH "/keyboard.cfg"
+#define KEYBOARD_LAYOUT_FILE FS_BASE_PATH "/menu.cfg"
 
 #if CONFIG_LV_COLOR_DEPTH == 32
 #define LCD_BIT_PER_PIXEL (24)
@@ -46,9 +58,8 @@ static SemaphoreHandle_t lvgl_mux = NULL;
 #define LCD_BIT_PER_PIXEL (16)
 #endif
 
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////// Please update the following configuration according to your LCD spec //////////////////////////////
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+#define LV_EVENT_LOAD_LAYOUT ((lv_event_code_t)(_LV_EVENT_LAST + 0)) // Use first available user event
+
 #define EXAMPLE_LCD_BK_LIGHT_ON_LEVEL 1
 #define EXAMPLE_LCD_BK_LIGHT_OFF_LEVEL !EXAMPLE_LCD_BK_LIGHT_ON_LEVEL
 #define EXAMPLE_PIN_NUM_LCD_CS (GPIO_NUM_12)
@@ -74,7 +85,7 @@ esp_lcd_touch_handle_t tp = NULL;
 // --- End Touch Pin Configuration ---
 
 
-#define EXAMPLE_LVGL_BUF_HEIGHT (EXAMPLE_LCD_V_RES / 8) // Keep buffer size reasonable
+#define EXAMPLE_LVGL_BUF_HEIGHT (EXAMPLE_LCD_V_RES / 12) // Keep buffer size reasonable
 #define EXAMPLE_LVGL_TICK_PERIOD_MS 2
 #define EXAMPLE_LVGL_TASK_MAX_DELAY_MS 500
 #define EXAMPLE_LVGL_TASK_MIN_DELAY_MS 1
@@ -93,22 +104,243 @@ static const sh8601_lcd_init_cmd_t lcd_init_cmds[] = {
     {0x51, (uint8_t[]){0xFF}, 1, 0},
 };
 
+// --- ESP-Now Globals ---
+#define ESP_NOW_PAIRING_TIMEOUT_MS 5000 // How long to attempt pairing (milliseconds)
+#define ESP_NOW_BROADCAST_INTERVAL_MS 500 // Interval between broadcasts
+#define ESP_NOW_PAIRING_MAGIC "ThumbPair" // Unique identifier for pairing messages
+
+// Shared data structure for ESP-NOW
+typedef struct {
+    uint8_t modifier_mask;
+} esp_now_modifier_state_t;
+
+typedef enum {
+    PAIRING_STATUS_INIT,
+    PAIRING_STATUS_WAITING, // Broadcasting and listening
+    PAIRING_STATUS_DONE,
+    PAIRING_STATUS_FAIL
+} esp_now_pairing_status_t;
+
+// Pairing message structure
+typedef struct {
+    char magic[sizeof(ESP_NOW_PAIRING_MAGIC)]; // Use fixed size for struct consistency
+    uint8_t mac_addr[ESP_NOW_ETH_ALEN];
+} esp_now_pairing_msg_t;
+
+// Global variables for pairing
+static volatile esp_now_pairing_status_t pairing_status = PAIRING_STATUS_INIT;
+static uint8_t peer_mac_address[ESP_NOW_ETH_ALEN] = {0}; // Store the discovered peer MAC
+static uint8_t my_mac_address[ESP_NOW_ETH_ALEN] = {0};   // Store own MAC
+static const uint8_t broadcast_mac_address[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}; // ESP-NOW Broadcast MAC
+
+static volatile uint8_t remote_modifier_mask = 0;
+
+// Callback function when data is sent
+static void esp_now_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status) {
+    if (status != ESP_NOW_SEND_SUCCESS) {
+        ESP_LOGW(TAG, "ESP-NOW Send failed to " MACSTR ", Status: %d", MAC2STR(mac_addr), status);
+    } else {
+        ESP_LOGI(TAG, "ESP-NOW Send success to " MACSTR, MAC2STR(mac_addr));
+    }
+}
+
+// Callback function when data is received
+static void esp_now_recv_cb(const esp_now_recv_info_t *recv_info, const uint8_t *incoming_data, int len) {
+    if (recv_info == NULL || incoming_data == NULL || len == 0) {
+        ESP_LOGW(TAG, "Invalid ESP-NOW data received (args)");
+        return;
+    }
+
+    uint8_t *sender_mac = recv_info->src_addr;
+    if (sender_mac == NULL) {
+        ESP_LOGW(TAG, "Invalid ESP-NOW sender MAC");
+        return;
+    }
+
+    // --- Handle Pairing Message ---
+    if (pairing_status == PAIRING_STATUS_WAITING &&
+        len == sizeof(esp_now_pairing_msg_t) &&
+        memcmp(sender_mac, my_mac_address, ESP_NOW_ETH_ALEN) != 0) // Don't pair with self
+    {
+        esp_now_pairing_msg_t pairing_msg;
+        memcpy(&pairing_msg, incoming_data, len);
+
+        // Check magic identifier
+        if (memcmp(pairing_msg.magic, ESP_NOW_PAIRING_MAGIC, sizeof(ESP_NOW_PAIRING_MAGIC)) == 0) {
+            ESP_LOGI(TAG, "Received valid pairing message from " MACSTR, MAC2STR(sender_mac));
+
+            // Store peer MAC
+            memcpy(peer_mac_address, sender_mac, ESP_NOW_ETH_ALEN);
+
+            // Add peer (check if already added to avoid errors, though unlikely here)
+            if (!esp_now_is_peer_exist(peer_mac_address)) {
+                esp_now_peer_info_t peer_info = {};
+                memcpy(peer_info.peer_addr, peer_mac_address, ESP_NOW_ETH_ALEN);
+                peer_info.channel = 0; // Use current channel
+                peer_info.ifidx = WIFI_IF_STA;
+                peer_info.encrypt = false; // Keep it simple
+
+                if (esp_now_add_peer(&peer_info) != ESP_OK) {
+                    ESP_LOGE(TAG, "Failed to add ESP-NOW peer " MACSTR, MAC2STR(peer_mac_address));
+                    // Keep waiting? Or fail? Let's mark as fail for now.
+                    pairing_status = PAIRING_STATUS_FAIL;
+                } else {
+                    ESP_LOGI(TAG, "Successfully added ESP-NOW peer: " MACSTR, MAC2STR(peer_mac_address));
+                    pairing_status = PAIRING_STATUS_DONE; // Pairing successful!
+                    // No need to explicitly stop broadcasting, the loop in init will check the status.
+                }
+            } else {
+                 ESP_LOGW(TAG, "ESP-NOW peer " MACSTR " already exists.", MAC2STR(peer_mac_address));
+                 pairing_status = PAIRING_STATUS_DONE; // Already added, consider it done
+            }
+            return; // Processed pairing message
+        }
+    }
+
+    // --- Handle Modifier State Message (Only if paired) ---
+    if (pairing_status == PAIRING_STATUS_DONE &&
+        len == sizeof(esp_now_modifier_state_t) &&
+        memcmp(sender_mac, peer_mac_address, ESP_NOW_ETH_ALEN) == 0) // Check if from known peer
+    {
+        esp_now_modifier_state_t received_state;
+        memcpy(&received_state, incoming_data, sizeof(received_state));
+        remote_modifier_mask = received_state.modifier_mask;
+        ESP_LOGD(TAG, "ESP-NOW Received modifier mask 0x%02X from peer", remote_modifier_mask); // Use DEBUG level
+    } else if (pairing_status == PAIRING_STATUS_DONE && memcmp(sender_mac, peer_mac_address, ESP_NOW_ETH_ALEN) != 0) {
+         ESP_LOGW(TAG, "ESP-NOW Received data from unknown MAC " MACSTR " after pairing.", MAC2STR(sender_mac));
+    }
+     // Ignore other messages or messages received before pairing is done
+}
+
+
+static void initialize_esp_now(void) {
+    ESP_LOGI(TAG, "Initializing ESP-NOW for pairing");
+    pairing_status = PAIRING_STATUS_INIT; // Reset status
+
+    // 1. Initialize Wi-Fi (same as before)
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    // Optional: Set a specific channel? esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+
+    // Get own MAC address
+    ESP_ERROR_CHECK(esp_wifi_get_mac(WIFI_IF_STA, my_mac_address));
+    ESP_LOGI(TAG, "My ESP-NOW MAC: " MACSTR, MAC2STR(my_mac_address));
+
+    // 2. Initialize ESP-NOW (same as before)
+    ESP_ERROR_CHECK(esp_now_init());
+    ESP_ERROR_CHECK(esp_now_register_send_cb(esp_now_send_cb));
+    ESP_ERROR_CHECK(esp_now_register_recv_cb(esp_now_recv_cb));
+
+    // 3. Add Broadcast Peer (Temporary for sending pairing messages)
+    esp_now_peer_info_t broadcast_peer_info = {};
+    memcpy(broadcast_peer_info.peer_addr, broadcast_mac_address, ESP_NOW_ETH_ALEN);
+    broadcast_peer_info.channel = 0; // Use current channel
+    broadcast_peer_info.ifidx = WIFI_IF_STA;
+    broadcast_peer_info.encrypt = false;
+    if (esp_now_add_peer(&broadcast_peer_info) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to add broadcast peer");
+        pairing_status = PAIRING_STATUS_FAIL;
+        return; // Cannot proceed
+    }
+
+    // 4. Start Pairing Broadcast/Listen Loop
+    ESP_LOGI(TAG, "Starting ESP-NOW pairing process (Timeout: %d ms)", ESP_NOW_PAIRING_TIMEOUT_MS);
+    pairing_status = PAIRING_STATUS_WAITING;
+    int64_t start_time = esp_timer_get_time();
+
+    esp_now_pairing_msg_t pairing_msg;
+    memcpy(pairing_msg.magic, ESP_NOW_PAIRING_MAGIC, sizeof(ESP_NOW_PAIRING_MAGIC));
+    memcpy(pairing_msg.mac_addr, my_mac_address, ESP_NOW_ETH_ALEN);
+
+    while (pairing_status == PAIRING_STATUS_WAITING) {
+        // Check timeout
+        if ((esp_timer_get_time() - start_time) / 1000 > ESP_NOW_PAIRING_TIMEOUT_MS) {
+            ESP_LOGW(TAG, "ESP-NOW Pairing timed out.");
+            pairing_status = PAIRING_STATUS_FAIL;
+            break; // Exit loop on timeout
+        }
+
+        // Send broadcast message
+        esp_err_t send_result = esp_now_send(broadcast_mac_address, (uint8_t *)&pairing_msg, sizeof(pairing_msg));
+        if (send_result != ESP_OK) {
+            ESP_LOGE(TAG, "ESP-NOW pairing broadcast send error: %s", esp_err_to_name(send_result));
+            // Consider if this should cause failure
+        } else {
+             ESP_LOGI(TAG, "Sent pairing broadcast");
+        }
+
+        // Wait before next broadcast (allow time for receiving)
+        // Add a small random delay to reduce collision probability if both start exactly simultaneously
+        uint32_t random_delay = esp_random() % (ESP_NOW_BROADCAST_INTERVAL_MS / 5);
+        vTaskDelay(pdMS_TO_TICKS(ESP_NOW_BROADCAST_INTERVAL_MS + random_delay));
+    }
+
+    // 5. Cleanup Broadcast Peer (optional but good practice)
+    esp_now_del_peer(broadcast_mac_address);
+
+    // 6. Final Status Check
+    if (pairing_status == PAIRING_STATUS_DONE) {
+        ESP_LOGI(TAG, "ESP-NOW Pairing successful with peer: " MACSTR, MAC2STR(peer_mac_address));
+    } else {
+        ESP_LOGE(TAG, "ESP-NOW Pairing failed.");
+        // Keep peer_mac_address zeroed out, sending logic will check pairing_status
+    }
+}
+
 // --- Keyboard Action Data Structures ---
 typedef enum {
     ACTION_TYPE_KEYCODE,
     ACTION_TYPE_TOGGLE,
-    ACTION_TYPE_FUNCTION
+    ACTION_TYPE_GOTO_LAYOUT
 } action_type_t;
 
 typedef struct {
     action_type_t type;
     union {
         uint8_t keycode;        // For KEYCODE and TOGGLE
-        char*   function_name;  // For FUNCTION (dynamically allocated)
+        char*   layout_filename;  // For FUNCTION (dynamically allocated)
     } data;
     bool toggle_state;          // Current state for toggle keys
 } button_action_t;
 
+// --- BLE HID Globals & Defines ---
+static uint16_t hid_conn_id = 0;
+static bool sec_conn = false; // Is the connection secure (paired and encrypted)?
+#define HIDD_DEVICE_NAME            "ThumbpadKB" // Changed device name
+
+static uint8_t hidd_service_uuid128[] = {
+    /* LSB <--------------------------------------------------------------------------------> MSB */
+    //first uuid, 16bit, [12],[13] is the value
+    0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0x12, 0x18, 0x00, 0x00,
+};
+
+static esp_ble_adv_data_t hidd_adv_data = {
+    .set_scan_rsp = false,
+    .include_name = true,
+    .include_txpower = true,
+    .min_interval = 0x0006, //slave connection min interval, Time = min_interval * 1.25 msec
+    .max_interval = 0x0010, //slave connection max interval, Time = max_interval * 1.25 msec
+    .appearance = 0x03c1,       // HID Keyboard // 0x03c0 is Generic HID
+    .manufacturer_len = 0,
+    .p_manufacturer_data =  NULL,
+    .service_data_len = 0,
+    .p_service_data = NULL,
+    .service_uuid_len = sizeof(hidd_service_uuid128),
+    .p_service_uuid = hidd_service_uuid128,
+    .flag = 0x6, // BR_EDR_NOT_SUPPORTED | LE General Discoverable Mode
+};
+
+static esp_ble_adv_params_t hidd_adv_params = {
+    .adv_int_min        = 0x20, // 32 * 0.625ms = 20ms
+    .adv_int_max        = 0x30, // 48 * 0.625ms = 30ms
+    .adv_type           = ADV_TYPE_IND,
+    .own_addr_type      = BLE_ADDR_TYPE_PUBLIC,
+    .channel_map        = ADV_CHNL_ALL,
+    .adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
+};
 
 // --- LVGL Callbacks and Helpers ---
 
@@ -262,6 +494,138 @@ static void example_lvgl_port_task(void *arg)
     }
 }
 
+// Callback for HID events
+static void hidd_event_callback(esp_hidd_cb_event_t event, esp_hidd_cb_param_t *param)
+{
+    switch(event) {
+        case ESP_HIDD_EVENT_REG_FINISH: {
+            if (param->init_finish.state == ESP_HIDD_INIT_OK) {
+                ESP_LOGI(TAG, "HID Profile Registered");
+                // Name is set, now configure advertising data
+                esp_ble_gap_set_device_name(HIDD_DEVICE_NAME);
+                esp_ble_gap_config_adv_data(&hidd_adv_data);
+                ESP_LOGI(TAG, "Advertising data configured");
+            } else {
+                ESP_LOGE(TAG, "HID Profile Register failed, error = %d", param->init_finish.state);
+            }
+            break;
+        }
+        case ESP_BAT_EVENT_REG: {
+             ESP_LOGI(TAG, "Battery Service Registered (if included)");
+            break;
+        }
+        case ESP_HIDD_EVENT_DEINIT_FINISH:
+             ESP_LOGI(TAG, "HID Profile Deinitialized");
+	     break;
+		case ESP_HIDD_EVENT_BLE_CONNECT: {
+            ESP_LOGI(TAG, "HID Connected, conn_id = %d", param->connect.conn_id);
+            hid_conn_id = param->connect.conn_id;
+            // Security is automatically requested by the stack after connection
+            break;
+        }
+        case ESP_HIDD_EVENT_BLE_DISCONNECT: {
+            sec_conn = false;
+            hid_conn_id = 0; // Reset connection ID
+            ESP_LOGI(TAG, "HID Disconnected");
+            // Restart advertising
+            esp_ble_gap_start_advertising(&hidd_adv_params);
+            ESP_LOGI(TAG, "Advertising restarted");
+            break;
+        }
+        case ESP_HIDD_EVENT_BLE_VENDOR_REPORT_WRITE_EVT: {
+            // Not used in standard keyboard, but good to have
+            ESP_LOGI(TAG, "Vendor Report Write Event: conn_id=%d, report_id=%d, len=%d",
+                     param->vendor_write.conn_id, param->vendor_write.report_id, param->vendor_write.length);
+            ESP_LOG_BUFFER_HEX(TAG, param->vendor_write.data, param->vendor_write.length);
+            break;
+        }
+        case ESP_HIDD_EVENT_BLE_LED_REPORT_WRITE_EVT: {
+            // Host writes to this to set keyboard LEDs (Caps Lock, Num Lock, etc.)
+            ESP_LOGI(TAG, "LED Report Write Event: conn_id=%d, report_id=%d, len=%d",
+                     param->led_write.conn_id, param->led_write.report_id, param->led_write.length);
+            ESP_LOG_BUFFER_HEX(TAG, param->led_write.data, param->led_write.length);
+            // TODO: Parse param->led_write.data to update LED status indicators in UI if needed
+            break;
+        }
+        default:
+            ESP_LOGD(TAG, "Unhandled HID Event: %d", event);
+            break;
+    }
+    return;
+}
+
+// Callback for GAP events (advertising, security)
+static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
+{
+    switch (event) {
+    // Advertising Events
+    case ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT:
+        ESP_LOGI(TAG, "Advertising data set complete, starting advertising.");
+        esp_ble_gap_start_advertising(&hidd_adv_params);
+        break;
+    case ESP_GAP_BLE_ADV_START_COMPLETE_EVT:
+        if (param->adv_start_cmpl.status == ESP_BT_STATUS_SUCCESS) {
+            ESP_LOGI(TAG, "Advertising started successfully");
+        } else {
+            ESP_LOGE(TAG, "Advertising start failed, error = %d", param->adv_start_cmpl.status);
+        }
+        break;
+    case ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT:
+         if (param->adv_stop_cmpl.status == ESP_BT_STATUS_SUCCESS) {
+            ESP_LOGI(TAG, "Advertising stopped successfully");
+        } else {
+            ESP_LOGE(TAG, "Advertising stop failed, error = %d", param->adv_stop_cmpl.status);
+        }
+        break;
+
+    // Security Events
+     case ESP_GAP_BLE_SEC_REQ_EVT:
+        /* send the positive security response to the peer device to accept the security request.
+        If not accept the security request, should send the security response with reject code*/
+        ESP_LOGI(TAG, "Security Request received, accepting.");
+        esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true);
+	 break;
+     case ESP_GAP_BLE_AUTH_CMPL_EVT:
+        sec_conn = false; // Assume failure until success check
+        esp_bd_addr_t bd_addr;
+        memcpy(bd_addr, param->ble_security.auth_cmpl.bd_addr, sizeof(esp_bd_addr_t));
+        ESP_LOGI(TAG, "Authentication Complete: remote BD_ADDR: %02x:%02x:%02x:%02x:%02x:%02x",
+                bd_addr[0], bd_addr[1], bd_addr[2], bd_addr[3], bd_addr[4], bd_addr[5]);
+        ESP_LOGI(TAG, "Address type = %d", param->ble_security.auth_cmpl.addr_type);
+        ESP_LOGI(TAG, "Pair status = %s", param->ble_security.auth_cmpl.success ? "Success" : "Fail");
+        if(!param->ble_security.auth_cmpl.success) {
+            ESP_LOGE(TAG, "Authentication Fail reason = 0x%x", param->ble_security.auth_cmpl.fail_reason);
+        } else {
+            ESP_LOGI(TAG, "Authentication Success! Link is now secure.");
+            sec_conn = true; // Set flag indicating secure connection ready for HID reports
+        }
+        break;
+
+    // Other GAP events (less relevant for basic HID)
+    case ESP_GAP_BLE_SCAN_RSP_DATA_SET_COMPLETE_EVT:
+        ESP_LOGD(TAG, "Scan Response Data Set Complete");
+        break;
+    case ESP_GAP_BLE_SCAN_PARAM_SET_COMPLETE_EVT:
+        ESP_LOGD(TAG, "Scan Parameters Set Complete");
+        break;
+    case ESP_GAP_BLE_SCAN_RESULT_EVT:
+        // Only relevant if scanning
+        break;
+    case ESP_GAP_BLE_UPDATE_CONN_PARAMS_EVT:
+         ESP_LOGI(TAG, "Connection Parameters Updated: status = %d, min_int = %d, max_int = %d, conn_int = %d, latency = %d, timeout = %d",
+                  param->update_conn_params.status,
+                  param->update_conn_params.min_int,
+                  param->update_conn_params.max_int,
+                  param->update_conn_params.conn_int,
+                  param->update_conn_params.latency,
+                  param->update_conn_params.timeout);
+        break;
+    default:
+        ESP_LOGD(TAG, "Unhandled GAP Event: %d", event);
+        break;
+    }
+}
+
 // --- Keyboard Creation from File ---
 
 // Forward declaration of the event handler
@@ -282,13 +646,6 @@ static void create_keyboard_from_file(const char* filename) {
     }
 
     ESP_LOGI(TAG, "Loading keyboard layout from: %s", filename);
-
-    // Task lock
-    if (!example_lvgl_lock(5000)) { // Wait max 5s for lock
-        ESP_LOGE(TAG, "Could not obtain LVGL lock to create keyboard");
-        fclose(f);
-        return;
-    }
 
     // --- Read Grid Dimensions ---
     int grid_cols = 0, grid_rows = 0;
@@ -339,7 +696,7 @@ static void create_keyboard_from_file(const char* filename) {
 
     static lv_style_t label_style;
     lv_style_init(&label_style);
-    lv_style_set_text_color(&label_style, lv_color_black()); // Set text color to blue
+    lv_style_set_text_color(&label_style, lv_color_black()); // Set text color to black
     lv_style_set_text_align(&label_style, LV_TEXT_ALIGN_CENTER); // Center
     lv_style_set_text_font(&label_style, &lv_font_montserrat_28_compressed);
 
@@ -408,18 +765,21 @@ static void create_keyboard_from_file(const char* filename) {
         button_action_t* action = static_cast<button_action_t*>(malloc(sizeof(button_action_t)));
         if (!action) {
             ESP_LOGE(TAG, "L%d: Failed to allocate memory for button action!", line_num);
+            // Clean up button/label? Maybe not necessary if grid cleanup handles it.
             continue; // Skip this button
         }
         action->toggle_state = false;
-        action->data.function_name = NULL;
+        // Initialize union members to prevent garbage data issues
+        action->data.layout_filename = NULL;
         action->data.keycode = 0; // Default to no-op
 
-        bool parse_error = false; // <<< DEFINE parse_error HERE
+        bool parse_error = false;
         if (action_data_len > 0) {
             char* end_ptr = NULL;
             errno = 0;
 
             if (action_data_str[0] == 'T' && action_data_len > 1) {
+                // --- TOGGLE Logic (remains the same) ---
                 action->type = ACTION_TYPE_TOGGLE;
                 long val = strtol(action_data_str + 1, &end_ptr, 16);
                 if (errno != 0 || end_ptr == (action_data_str + 1) || *end_ptr != '\0' || val < 0 || val > 255) {
@@ -429,31 +789,42 @@ static void create_keyboard_from_file(const char* filename) {
                     action->data.keycode = (uint8_t)val;
                     ESP_LOGD(TAG, "L%d: Btn: '%s' -> TOGGLE Keycode: 0x%02X", line_num, label_str, action->data.keycode);
                 }
-            } else if (action_data_str[0] == 'F' && action_data_len > 1) {
-                action->type = ACTION_TYPE_FUNCTION;
-                const char* func_name_src = action_data_str + 1;
-                size_t name_len = strlen(func_name_src);
-                action->data.function_name = static_cast<char*>(malloc(name_len + 1));
-                if (action->data.function_name) {
-                    strcpy(action->data.function_name, func_name_src);
-                    ESP_LOGD(TAG, "L%d: Btn: '%s' -> FUNCTION Name: %s", line_num, label_str, action->data.function_name);
+            // --- NEW: GOTO_LAYOUT Logic ---
+            } else if (action_data_str[0] == 'G' && action_data_len > 1) {
+                action->type = ACTION_TYPE_GOTO_LAYOUT;
+                const char* filename_src = action_data_str + 1;
+                size_t name_len = strlen(filename_src);
+                // Allocate memory for the filename (+1 for null terminator)
+                action->data.layout_filename = static_cast<char*>(malloc(name_len + 1));
+                if (action->data.layout_filename) {
+                    strcpy(action->data.layout_filename, filename_src);
+                    ESP_LOGD(TAG, "L%d: Btn: '%s' -> GOTO_LAYOUT File: %s", line_num, label_str, action->data.layout_filename);
                 } else {
-                    ESP_LOGE(TAG, "L%d: Failed to allocate memory for function name '%s'!", line_num, label_str);
+                    ESP_LOGE(TAG, "L%d: Failed to allocate memory for layout filename '%s'!", line_num, label_str);
                     parse_error = true;
                 }
+            // --- KEYCODE Logic (default case) ---
             } else {
                 action->type = ACTION_TYPE_KEYCODE;
                 long val = strtol(action_data_str, &end_ptr, 16);
+                // Allow '0' or '00' as valid keycode (no-op)
                 if (errno != 0 || end_ptr == action_data_str || *end_ptr != '\0' || val < 0 || val > 255) {
-                    ESP_LOGE(TAG, "L%d: Invalid hex value for Keycode '%s': %s", line_num, label_str, action_data_str);
-                    parse_error = true;
-                } else {
+                     // Check if it's just '0' or '00' which is valid for no-op
+                     if (!( (strcmp(action_data_str, "0") == 0 || strcmp(action_data_str, "00") == 0) && end_ptr != action_data_str && *end_ptr == '\0') ) {
+                        ESP_LOGE(TAG, "L%d: Invalid hex value for Keycode '%s': %s", line_num, label_str, action_data_str);
+                        parse_error = true;
+                     } else {
+                         val = 0; // Ensure it's treated as 0
+                     }
+                }
+                // Only assign if no error occurred or if it was a valid '0'/'00'
+                if (!parse_error) {
                     action->data.keycode = (uint8_t)val;
                     ESP_LOGD(TAG, "L%d: Btn: '%s' -> KEYCODE: 0x%02X ('%c')", line_num, label_str, action->data.keycode, isprint(action->data.keycode) ? action->data.keycode : '.');
                 }
             }
         } else {
-             ESP_LOGW(TAG, "L%d: Button '%s' has no action data.", line_num, label_str);
+             ESP_LOGW(TAG, "L%d: Button '%s' has no action data. Setting to no-op.", line_num, label_str);
              action->type = ACTION_TYPE_KEYCODE;
              action->data.keycode = 0;
         }
@@ -462,15 +833,16 @@ static void create_keyboard_from_file(const char* filename) {
             ESP_LOGE(TAG, "L%d: Parse error for button '%s', setting to no-op.", line_num, label_str);
             action->type = ACTION_TYPE_KEYCODE;
             action->data.keycode = 0;
-            if (action->data.function_name) {
-                free(action->data.function_name);
-                action->data.function_name = NULL;
+            // Free filename memory if allocated during a failed GOTO parse
+            if (action->data.layout_filename) {
+                free(action->data.layout_filename);
+                action->data.layout_filename = NULL;
             }
         }
 
         // Log AFTER attempting to parse action
         if (!parse_error) {
-             ESP_LOGI(TAG, "L%d: Button '%s' created successfully.", line_num, label_str);
+             ESP_LOGD(TAG, "L%d: Button '%s' created successfully.", line_num, label_str); // Changed level to DEBUG
         } else {
              // Error already logged during parsing attempt
         }
@@ -490,15 +862,14 @@ static void create_keyboard_from_file(const char* filename) {
     // Add the cleanup callback to the grid itself
     lv_obj_add_event_cb(grid, cleanup_keyboard_cb, LV_EVENT_DELETE, NULL);
 
-    // Task unlock
-    example_lvgl_unlock();
-
     ESP_LOGI(TAG, "Keyboard layout loaded.");
 
-} // <<< END OF create_keyboard_from_file FUNCTION BLOCK - Ensure this brace matches the function definition
-
+}
 
 // --- Event Handlers ---
+
+// TODO: Implement proper modifier key state management
+static key_mask_t current_modifier_mask = 0;
 
 // Event handler for all keyboard buttons
 static void keyboard_event_cb(lv_event_t * e) {
@@ -508,81 +879,100 @@ static void keyboard_event_cb(lv_event_t * e) {
 
     if (!action) return; // Should not happen if setup is correct
 
-    // --- Handle different action types ---
-    switch (action->type) {
-        case ACTION_TYPE_KEYCODE:
-            if (code == LV_EVENT_PRESSED) {
-                ESP_LOGI(TAG, "Key Press: 0x%02X ('%c')", action->data.keycode, isprint(action->data.keycode) ? action->data.keycode : '.');
-                // ---> SEND KEY PRESS VIA BLE <---
-                if (action->data.keycode != 0) { // Don't send press for 'no key' (0x00)
-                    BleHidKeyboard::sendKeyPress(action->data.keycode);
-                }
-            } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
-                 ESP_LOGI(TAG, "Key Release: 0x%02X", action->data.keycode);
-                 // ---> SEND KEY RELEASE VIA BLE <---
-                 // Send release for all keys, including 0x00 if it was pressed (though it shouldn't be)
-                 BleHidKeyboard::sendKeyRelease();
-            }
-            break;
-
-        case ACTION_TYPE_TOGGLE:
-            if (code == LV_EVENT_CLICKED) { // Use CLICKED for toggles
-                action->toggle_state = !action->toggle_state;
-                ESP_LOGI(TAG, "Toggle Key: 0x%02X -> State: %s", action->data.keycode, action->toggle_state ? "ON" : "OFF");
-
-                // Add visual feedback
-                if (action->toggle_state) {
-                    lv_obj_add_state(btn, LV_STATE_CHECKED);
+    // --- Handle GOTO_LAYOUT separately first ---
+    if (action->type == ACTION_TYPE_GOTO_LAYOUT) {
+        if (code == LV_EVENT_CLICKED) {
+            ESP_LOGI(TAG, "Layout Change Request: %s", action->data.layout_filename ? action->data.layout_filename : "<NULL>");
+            if (action->data.layout_filename != NULL && strlen(action->data.layout_filename) > 0) {
+                char* filename_copy = strdup(action->data.layout_filename);
+                if (filename_copy) {
+                    lv_event_send(lv_scr_act(), LV_EVENT_LOAD_LAYOUT, (void*)filename_copy);
                 } else {
-                    lv_obj_clear_state(btn, LV_STATE_CHECKED);
+                    ESP_LOGE(TAG, "Failed to allocate memory for filename copy!");
                 }
-
-                // ---> SEND TOGGLE STATE VIA BLE <---
-                // This requires managing modifier state or sending press/release accordingly
-                // For now, let's just send a press when ON and release when OFF
-                // WARNING: This simple approach won't work correctly for standard modifiers like Shift/Ctrl.
-                // A proper implementation needs a central state manager for modifiers.
-                if (action->toggle_state) {
-                     BleHidKeyboard::sendKeyPress(action->data.keycode);
-                } else {
-                     BleHidKeyboard::sendKeyRelease(); // Release all keys, including the toggled one
-                }
+            } else {
+                 ESP_LOGE(TAG, "GOTO_LAYOUT action has NULL or empty filename!");
             }
-            break;
+        }
+        return; // Don't process BLE events for layout change buttons
+    }
 
-        case ACTION_TYPE_FUNCTION:
-             if (code == LV_EVENT_CLICKED) {
-                 ESP_LOGI(TAG, "Function Call Request: %s", action->data.function_name ? action->data.function_name : "<NULL>");
-                 if (action->data.function_name == NULL) break;
+    // --- Handle Modifier Key Toggles (Update Mask Only) ---
+    if (action->type == ACTION_TYPE_TOGGLE) {
+        if (code == LV_EVENT_CLICKED) {
+            key_mask_t mask_bit = action->data.keycode;
 
-                 // Example: Implement Backspace using BLE
-                 if (strcmp(action->data.function_name, "Backspace") == 0) {
-                     ESP_LOGI(TAG, "Executing 'Backspace'");
-                     BleHidKeyboard::sendKeyPress(0x2a); // Send press
-                     // Need a slight delay or mechanism to ensure release is sent after press
-                     // For simplicity here, rely on the next key press/release to clear it,
-                     // OR send release immediately (might be too fast for some OS)
-                     // vTaskDelay(pdMS_TO_TICKS(20)); // Small delay - adjust as needed
-                     BleHidKeyboard::sendKeyRelease(); // Send release
-                 }
-                 // ---> TODO: Implement other function calls <---
-                 else if (strcmp(action->data.function_name, "Next") == 0) {
-                     ESP_LOGI(TAG, "Executing 'Next' function placeholder");
-                 } else {
-                     ESP_LOGW(TAG, "Unknown function name in keyboard layout: %s", action->data.function_name);
-                 }
-             }
-             break;
+            // Toggle the state
+            action->toggle_state = !action->toggle_state;
+
+            // Update the global modifier mask
+            if (action->toggle_state) { // Modifier is now ON
+                current_modifier_mask |= mask_bit;
+                lv_obj_add_state(btn, LV_STATE_CHECKED);
+            } else { // Modifier is now OFF
+                current_modifier_mask &= ~mask_bit;
+                lv_obj_clear_state(btn, LV_STATE_CHECKED);
+            }
+
+            ESP_LOGI(TAG, "Modifier Toggle: Key 0x%02X -> State: %s -> Mask: 0x%02X",
+                     action->data.keycode, action->toggle_state ? "ON" : "OFF", current_modifier_mask);
+
+            // --- Send modifier state update via ESP-NOW (only if paired) ---
+            if (pairing_status == PAIRING_STATUS_DONE) {
+                esp_now_modifier_state_t current_state;
+                current_state.modifier_mask = current_modifier_mask;
+                esp_err_t send_result = esp_now_send(peer_mac_address, (uint8_t *)&current_state, sizeof(current_state));
+                if (send_result != ESP_OK) {
+                    ESP_LOGE(TAG, "ESP-NOW send error to peer: %s", esp_err_to_name(send_result));
+                    // Optional: Handle repeated send failures? Maybe mark peer as lost?
+                }
+            } else {
+                ESP_LOGD(TAG, "Not paired via ESP-NOW, skipping modifier send.");
+            }
+            // DO NOT send a report here. The mask is sent with the next regular key.
+        }
+        return; // Modifier toggles don't send reports directly
+    }
+
+
+    // --- Handle Regular Key Presses/Releases (Send Report with Current Mask) ---
+    if (action->type == ACTION_TYPE_KEYCODE) {
+        // Only send reports if connected and security is established
+        if (!sec_conn) {
+            if (code == LV_EVENT_PRESSED) { // Log only on initial press attempt
+                ESP_LOGW(TAG, "Keycode 0x%02X action ignored: BLE not securely connected.", action->data.keycode);
+            }
+            return;
+        }
+
+        // --- Send Report ---
+        uint8_t combined_mask = current_modifier_mask | remote_modifier_mask;
+        if (code == LV_EVENT_PRESSED) {
+            ESP_LOGD(TAG, "Key Press: 0x%02X with Modifiers: 0x%02X", action->data.keycode, combined_mask);
+            if (action->data.keycode != 0) { // Don't send press for 'no key' (0x00)
+                uint8_t keycode_array[1] = { action->data.keycode };
+                esp_hidd_send_keyboard_value(hid_conn_id, combined_mask, keycode_array, 1);
+            } else {
+                // If keycode is 0 (no-op), still send a report with just the current modifiers
+                // This might be needed if a modifier was toggled but no other key was pressed yet.
+                // However, standard HID usually expects a key press/release cycle.
+                // Let's stick to the standard: only send non-zero key presses.
+                // If you need to send modifier changes without key presses, that's less standard.
+            }
+        } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+            ESP_LOGD(TAG, "Key Release: 0x%02X with Modifiers: 0x%02X", action->data.keycode, combined_mask);
+            // Send empty report (key released) but include the current modifier state
+            esp_hidd_send_keyboard_value(hid_conn_id, combined_mask, NULL, 0);
+        }
     }
 }
-
 // Cleanup callback to free allocated user data when the grid is deleted
 static void cleanup_keyboard_cb(lv_event_t * e) {
     lv_obj_t * grid = lv_event_get_target(e);
     if (!grid) return;
 
     uint32_t child_cnt = lv_obj_get_child_cnt(grid);
-    ESP_LOGI(TAG, "Cleaning up keyboard user data for %d children", child_cnt);
+    ESP_LOGI(TAG, "Cleaning up keyboard user data for %lu children", child_cnt);
 
     for (uint32_t i = 0; i < child_cnt; i++) {
         lv_obj_t * child = lv_obj_get_child(grid, i);
@@ -590,10 +980,11 @@ static void cleanup_keyboard_cb(lv_event_t * e) {
         if (child && lv_obj_check_type(child, &lv_btn_class)) { // Check if it's a button
              button_action_t* action = static_cast<button_action_t*>(lv_obj_get_user_data(child));
              if (action) {
-                 ESP_LOGD(TAG, "Freeing action data for child %d", i);
-                 if (action->type == ACTION_TYPE_FUNCTION && action->data.function_name) {
-                     free(action->data.function_name); // Free allocated function name string
-                     action->data.function_name = NULL; // Prevent double free
+                 ESP_LOGD(TAG, "Freeing action data for child %lu (type %d)", i, action->type);
+                 // Free layout filename if allocated
+                 if (action->type == ACTION_TYPE_GOTO_LAYOUT && action->data.layout_filename) {
+                     free(action->data.layout_filename);
+                     action->data.layout_filename = NULL; // Prevent double free
                  }
                  free(action); // Free the action struct itself
                  lv_obj_set_user_data(child, NULL); // Clear pointer
@@ -603,6 +994,35 @@ static void cleanup_keyboard_cb(lv_event_t * e) {
      ESP_LOGI(TAG, "Keyboard cleanup finished.");
 }
 
+// --- New Screen Event Handler ---
+static void screen_event_cb(lv_event_t * e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    lv_obj_t * scr = lv_event_get_target(e);
+
+    if (code == LV_EVENT_LOAD_LAYOUT) {
+        char* filename_to_load = (char*)lv_event_get_param(e);
+        if (filename_to_load) {
+            ESP_LOGI(TAG, "Screen Event: Received request to load layout '%s'", filename_to_load);
+
+            // 1. Clean the current screen (triggers cleanup_keyboard_cb)
+            lv_obj_clean(scr);
+
+            // 2. Construct full path
+            char full_path[128]; // Adjust size as needed
+            snprintf(full_path, sizeof(full_path), "%s/%s", FS_BASE_PATH, filename_to_load);
+
+            // 3. Load the new layout
+            ESP_LOGI(TAG, "Loading new layout from: %s", full_path);
+            create_keyboard_from_file(full_path); // This function handles its own file opening errors
+
+            // 4. Free the filename string passed via the event
+            free(filename_to_load);
+        } else {
+            ESP_LOGE(TAG, "Screen Event: Received LV_EVENT_LOAD_LAYOUT with NULL filename!");
+        }
+    }
+    // Add other screen events here if needed
+}
 
 // --- Main Application ---
 
@@ -612,10 +1032,23 @@ extern "C" void app_main(void)
     esp_log_level_set("lcd_panel.io.i2c", ESP_LOG_NONE);
     esp_log_level_set("FT5x06", ESP_LOG_NONE);
     esp_log_level_set("spi_master", ESP_LOG_WARN);
+    esp_log_level_set("HID_LE_PRF", ESP_LOG_INFO); // Set log level for the HID profile code
     // esp_log_level_set("gpio", ESP_LOG_WARN);
 
     static lv_disp_draw_buf_t disp_buf; // contains internal graphic buffer(s)
     static lv_disp_drv_t disp_drv;      // contains callback functions
+    esp_err_t ret; // Use for error checking
+
+    // --- Initialize NVS ---
+    // NVS is required for BLE bonding/pairing information storage.
+    ESP_LOGI(TAG, "Initializing NVS");
+    ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+    ESP_LOGI(TAG, "NVS Initialized");
 
     // --- Initialize LittleFS ---
     ESP_LOGI(TAG, "Initializing LittleFS");
@@ -625,7 +1058,7 @@ extern "C" void app_main(void)
         .format_if_mount_failed = true, // Format on first boot or if corrupt
         .dont_mount = false,
     };
-    esp_err_t ret = esp_vfs_littlefs_register(&fs_conf);
+    ret = esp_vfs_littlefs_register(&fs_conf);
     if (ret != ESP_OK) {
         if (ret == ESP_FAIL) {
             ESP_LOGE(TAG, "Failed to mount or format filesystem");
@@ -646,17 +1079,72 @@ extern "C" void app_main(void)
     }
     // --- Filesystem Initialized ---
 
-    // --- Initialize BLE HID Keyboard ---
-    // IMPORTANT: Call this *after* NVS is initialized (which happens in BleHidKeyboard::init)
-    //            and *before* the UI tries to send key presses.
-    if (!BleHidKeyboard::init("TpadKB")) { // Use a specific name
-        ESP_LOGE(TAG, "Failed to initialize BLE HID Keyboard!");
-        // Handle error appropriately - maybe display on screen or halt
-        // For now, continue, but BLE won't work.
-    } else {
-        ESP_LOGI(TAG, "BLE HID Keyboard Initialized Successfully.");
+    // --- Start: Initialize BLE Stack and HID Profile ---
+    ESP_LOGI(TAG, "Initializing Bluetooth");
+    ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
+
+    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+    ret = esp_bt_controller_init(&bt_cfg);
+    if (ret) {
+        ESP_LOGE(TAG, "Initialize BT controller failed: %s", esp_err_to_name(ret));
+        return;
     }
-    // --- End BLE HID Keyboard Initialization ---
+
+    ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
+    if (ret) {
+        ESP_LOGE(TAG, "Enable BT controller failed: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    ret = esp_bluedroid_init();
+    if (ret) {
+        ESP_LOGE(TAG, "Init Bluedroid failed: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    ret = esp_bluedroid_enable();
+    if (ret) {
+        ESP_LOGE(TAG, "Enable Bluedroid failed: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    ret = esp_hidd_profile_init(); // Initialize HID Device Profile
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Init HID Profile failed: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    // Register callbacks for GAP and HID events
+    esp_ble_gap_register_callback(gap_event_handler);
+    esp_hidd_register_callbacks(hidd_event_callback);
+
+    /* Set the security parameters for pairing/bonding */
+    esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_MITM_BOND; // Secure Connection + MITM + Bonding
+    esp_ble_io_cap_t iocap = ESP_IO_CAP_NONE; // No Input No Output capability
+    uint8_t key_size = 16;      // the key size should be 7~16 bytes
+    uint8_t init_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK; // Distribute encryption and identity keys
+    uint8_t rsp_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;  // Accept encryption and identity keys
+    //uint32_t passkey = 123456; // Example passkey if using IO_CAP_OUT or IO_CAP_IO
+
+    esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, sizeof(uint8_t));
+    esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, sizeof(uint8_t));
+    esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &key_size, sizeof(uint8_t));
+    /* If your BLE device act as a Slave, the init_key means you hope which types of key of the master should distribute to you,
+    and the response key means which key you can distribute to the Master;
+    If your BLE device act as a master, the response key means you hope which types of key of the slave should distribute to you,
+    and the init key means which key you can distribute to the slave. */
+    esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &init_key, sizeof(uint8_t));
+    esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &rsp_key, sizeof(uint8_t));
+
+    // Passkey setting (only needed if IO Cap requires it)
+    // uint32_t passkey = 123456;
+    // esp_ble_gap_set_security_param(ESP_BLE_SM_SET_STATIC_PASSKEY, &passkey, sizeof(uint32_t));
+
+    ESP_LOGI(TAG, "Bluetooth Initialized and HID Profile Setup Started");
+    // Advertising will start automatically via the GAP event handler after registration finishes
+
+    // --- Initialize ESP-Now ---
+    initialize_esp_now();
 
     // --- I2C Initialization (for Touch and IO Expander) ---
     ESP_LOGI(TAG, "Initialize I2C bus");
@@ -666,8 +1154,8 @@ extern "C" void app_main(void)
         .scl_io_num = EXAMPLE_PIN_NUM_TOUCH_SCL,
         .sda_pullup_en = GPIO_PULLUP_ENABLE,
         .scl_pullup_en = GPIO_PULLUP_ENABLE,
-        .master = { // <-- Correctly initialize nested struct
-            .clk_speed = 200 * 1000
+        .master = {
+            .clk_speed = 200 * 1000 // Reduced speed slightly
         }
         // .clk_flags = 0 // Add if needed by your IDF version
     };
@@ -677,8 +1165,8 @@ extern "C" void app_main(void)
     // --- IO Expander Initialization ---
     esp_io_expander_handle_t io_expander = NULL;
     // Initialize only once
-    ESP_ERROR_CHECK(esp_io_expander_new_i2c_tca9554(TOUCH_HOST, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &io_expander));
-    if (io_expander) {
+    ret = esp_io_expander_new_i2c_tca9554(TOUCH_HOST, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &io_expander);
+    if (ret == ESP_OK && io_expander) {
         ESP_LOGI(TAG, "IO Expander TCA9554 Initialized");
         // Configure pins 0, 1, 2 as outputs and toggle them (likely power/reset control)
         esp_io_expander_set_dir(io_expander, IO_EXPANDER_PIN_NUM_0 | IO_EXPANDER_PIN_NUM_1 | IO_EXPANDER_PIN_NUM_2, IO_EXPANDER_OUTPUT);
@@ -687,7 +1175,7 @@ extern "C" void app_main(void)
         esp_io_expander_set_level(io_expander, IO_EXPANDER_PIN_NUM_0 | IO_EXPANDER_PIN_NUM_1 | IO_EXPANDER_PIN_NUM_2, 1); // Set all high
         vTaskDelay(pdMS_TO_TICKS(200)); // Short delay
     } else {
-         ESP_LOGE(TAG, "Failed to initialize IO Expander");
+         ESP_LOGE(TAG, "Failed to initialize IO Expander: %s", esp_err_to_name(ret));
     }
 
 
@@ -709,7 +1197,7 @@ extern "C" void app_main(void)
         .sclk_io_num = EXAMPLE_PIN_NUM_LCD_PCLK,
         .data2_io_num = EXAMPLE_PIN_NUM_LCD_DATA2,
         .data3_io_num = EXAMPLE_PIN_NUM_LCD_DATA3,
-        .max_transfer_sz = EXAMPLE_LCD_H_RES * EXAMPLE_LVGL_BUF_HEIGHT * sizeof(lv_color_t) * 2,
+        .max_transfer_sz = EXAMPLE_LCD_H_RES * EXAMPLE_LVGL_BUF_HEIGHT * sizeof(lv_color_t) * 2, // Increased buffer size slightly
     };
     ESP_ERROR_CHECK(spi_bus_initialize(LCD_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
@@ -799,8 +1287,6 @@ extern "C" void app_main(void)
     disp_drv.draw_buf = &disp_buf;
     disp_drv.user_data = panel_handle;
     // Set initial rotation and enable software rotation
-    // NOTE: Rotation is handled in update_cb based on drv->rotated
-    // Set the initial desired rotation here. update_cb will apply it.
     disp_drv.rotated = LV_DISP_ROT_90; // Example: Start rotated 90 degrees
     disp_drv.sw_rotate = 1; // Enable LVGL software rotation
     lv_disp_t *disp = lv_disp_drv_register(&disp_drv);
@@ -833,6 +1319,9 @@ extern "C" void app_main(void)
     assert(lvgl_mux);
     BaseType_t task_created = xTaskCreate(example_lvgl_port_task, "LVGL", EXAMPLE_LVGL_TASK_STACK_SIZE, NULL, EXAMPLE_LVGL_TASK_PRIORITY, NULL);
     assert(task_created == pdPASS);
+
+    ESP_LOGI(TAG, "Adding screen event handler");
+    lv_obj_add_event_cb(lv_scr_act(), screen_event_cb, LV_EVENT_ALL, NULL); // Add handler to screen
 
     // --- Create UI ---
     ESP_LOGI(TAG, "Create UI from file");

@@ -18,4 +18,3 @@ dependencies:
     public: true
 
   joltwallet/littlefs: ^1.19.1
-  h2zero/esp-nimble-cpp: ^2.2.1
