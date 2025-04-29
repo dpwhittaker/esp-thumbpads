@@ -107,8 +107,8 @@ static const sh8601_lcd_init_cmd_t lcd_init_cmds[] = {
 // --- ESP-Now Globals ---
 #define ESP_NOW_PAIRING_TIMEOUT_MS 5000 // How long to attempt pairing (milliseconds)
 #define ESP_NOW_BROADCAST_INTERVAL_MS 500 // Interval between broadcasts
-#define ESP_NOW_PAIRING_MAGIC "ThumbPair" // Unique identifier for pairing messages
-
+uint8_t pair_message[10] = "ThumbPair"; // Unique identifier for pairing messages
+uint8_t pair_ack_message[10] = "ThumbPack"; // Unique identifier for pairing acknowledgment
 // Shared data structure for ESP-NOW
 typedef struct {
     uint8_t modifier_mask;
@@ -120,12 +120,6 @@ typedef enum {
     PAIRING_STATUS_DONE,
     PAIRING_STATUS_FAIL
 } esp_now_pairing_status_t;
-
-// Pairing message structure
-typedef struct {
-    char magic[sizeof(ESP_NOW_PAIRING_MAGIC)]; // Use fixed size for struct consistency
-    uint8_t mac_addr[ESP_NOW_ETH_ALEN];
-} esp_now_pairing_msg_t;
 
 // Global variables for pairing
 static volatile esp_now_pairing_status_t pairing_status = PAIRING_STATUS_INIT;
@@ -157,69 +151,98 @@ static void esp_now_recv_cb(const esp_now_recv_info_t *recv_info, const uint8_t 
         return;
     }
 
-    // --- Handle Pairing Message ---
-    if (pairing_status == PAIRING_STATUS_WAITING &&
-        len == sizeof(esp_now_pairing_msg_t) &&
-        memcmp(sender_mac, my_mac_address, ESP_NOW_ETH_ALEN) != 0) // Don't pair with self
-    {
-        esp_now_pairing_msg_t pairing_msg;
-        memcpy(&pairing_msg, incoming_data, len);
+    if (memcmp(sender_mac, my_mac_address, ESP_NOW_ETH_ALEN) == 0) return;
 
-        // Check magic identifier
-        if (memcmp(pairing_msg.magic, ESP_NOW_PAIRING_MAGIC, sizeof(ESP_NOW_PAIRING_MAGIC)) == 0) {
-            ESP_LOGI(TAG, "Received valid pairing message from " MACSTR, MAC2STR(sender_mac));
+    bool is_pair_message = (len == sizeof(pair_message) &&
+        memcmp(incoming_data, pair_message, sizeof(pair_message)) == 0);
+    bool is_pair_ack_message = (len == sizeof(pair_ack_message) &&
+        memcmp(incoming_data, pair_ack_message, sizeof(pair_ack_message)) == 0);
+    if (is_pair_message || is_pair_ack_message) {
+        ESP_LOGI(TAG, "Received pairing message from " MACSTR, MAC2STR(sender_mac));
 
-            // Store peer MAC
-            memcpy(peer_mac_address, sender_mac, ESP_NOW_ETH_ALEN);
+        // Check if this peer is already known or if we need to add them
+        bool peer_exists = esp_now_is_peer_exist(sender_mac);
 
-            // Add peer (check if already added to avoid errors, though unlikely here)
-            if (!esp_now_is_peer_exist(peer_mac_address)) {
-                esp_now_peer_info_t peer_info = {};
-                memcpy(peer_info.peer_addr, peer_mac_address, ESP_NOW_ETH_ALEN);
-                peer_info.channel = 0; // Use current channel
-                peer_info.ifidx = WIFI_IF_STA;
-                peer_info.encrypt = false; // Keep it simple
+        if (!peer_exists) {
+            esp_now_peer_info_t peer_info = {};
+            memcpy(peer_info.peer_addr, sender_mac, ESP_NOW_ETH_ALEN);
+            peer_info.channel = 0; // Use current channel (or specific channel if set)
+            peer_info.ifidx = WIFI_IF_STA;
+            peer_info.encrypt = false;
 
-                if (esp_now_add_peer(&peer_info) != ESP_OK) {
-                    ESP_LOGE(TAG, "Failed to add ESP-NOW peer " MACSTR, MAC2STR(peer_mac_address));
-                    // Keep waiting? Or fail? Let's mark as fail for now.
-                    pairing_status = PAIRING_STATUS_FAIL;
-                } else {
-                    ESP_LOGI(TAG, "Successfully added ESP-NOW peer: " MACSTR, MAC2STR(peer_mac_address));
-                    pairing_status = PAIRING_STATUS_DONE; // Pairing successful!
-                    // No need to explicitly stop broadcasting, the loop in init will check the status.
-                }
+            if (esp_now_add_peer(&peer_info) != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to add ESP-NOW peer " MACSTR, MAC2STR(sender_mac));
+                // Don't change pairing status on failure to add peer
             } else {
-                 ESP_LOGW(TAG, "ESP-NOW peer " MACSTR " already exists.", MAC2STR(peer_mac_address));
-                 pairing_status = PAIRING_STATUS_DONE; // Already added, consider it done
+                ESP_LOGI(TAG, "Successfully added ESP-NOW peer: " MACSTR, MAC2STR(sender_mac));
+                peer_exists = true; // Mark as existing now
             }
-            return; // Processed pairing message
+        } else {
+                ESP_LOGD(TAG, "Received pairing message from existing peer: " MACSTR, MAC2STR(sender_mac));
         }
-    }
 
-    // --- Handle Modifier State Message (Only if paired) ---
+        // If peer was added successfully OR already existed, update our state and send reply
+        if (peer_exists) {
+                // Store the peer MAC if not already set or if different (unlikely)
+                if (pairing_status != PAIRING_STATUS_DONE || memcmp(peer_mac_address, sender_mac, ESP_NOW_ETH_ALEN) != 0) {
+                    memcpy(peer_mac_address, sender_mac, ESP_NOW_ETH_ALEN);
+                    ESP_LOGI(TAG, "Pairing partner set to: " MACSTR, MAC2STR(peer_mac_address));
+                }
+                pairing_status = PAIRING_STATUS_DONE; // Mark as done (or confirm done)
+
+                // --- Send pairing message back to the sender (unicast) ---
+                if (is_pair_message) { // don't reply to ACK messages
+                    esp_err_t send_result = esp_now_send(sender_mac, pair_ack_message, sizeof(pair_ack_message));
+                    if (send_result != ESP_OK) {
+                        ESP_LOGE(TAG, "Failed to send pairing reply to " MACSTR ": %s", MAC2STR(sender_mac), esp_err_to_name(send_result));
+                    } else {
+                        ESP_LOGI(TAG, "Sent pairing reply to " MACSTR, MAC2STR(sender_mac));
+                    }
+                }
+                // --- End send reply ---
+        }
+        return; // Processed pairing message
+    } // --- End Pairing Message Handling ---
+
+
+    // --- Handle Modifier State Message (Only if paired and from the known peer) ---
     if (pairing_status == PAIRING_STATUS_DONE &&
         len == sizeof(esp_now_modifier_state_t) &&
         memcmp(sender_mac, peer_mac_address, ESP_NOW_ETH_ALEN) == 0) // Check if from known peer
     {
         esp_now_modifier_state_t received_state;
         memcpy(&received_state, incoming_data, sizeof(received_state));
-        remote_modifier_mask = received_state.modifier_mask;
-        ESP_LOGD(TAG, "ESP-NOW Received modifier mask 0x%02X from peer", remote_modifier_mask); // Use DEBUG level
-    } else if (pairing_status == PAIRING_STATUS_DONE && memcmp(sender_mac, peer_mac_address, ESP_NOW_ETH_ALEN) != 0) {
-         ESP_LOGW(TAG, "ESP-NOW Received data from unknown MAC " MACSTR " after pairing.", MAC2STR(sender_mac));
+        // Prevent rapid logging if modifier state hasn't actually changed
+        if (remote_modifier_mask != received_state.modifier_mask) {
+             remote_modifier_mask = received_state.modifier_mask;
+             ESP_LOGI(TAG, "ESP-NOW Received modifier mask 0x%02X from peer", remote_modifier_mask); // Changed to INFO
+        } else {
+             ESP_LOGI(TAG, "ESP-NOW Received unchanged modifier mask 0x%02X from peer", remote_modifier_mask);
+        }
+    } else if (len == sizeof(esp_now_modifier_state_t) && memcmp(sender_mac, my_mac_address, ESP_NOW_ETH_ALEN) != 0) {
+         // Log if we receive a modifier state from someone other than the paired peer (or before pairing)
+         ESP_LOGW(TAG, "ESP-NOW Received modifier state data from unexpected MAC " MACSTR, MAC2STR(sender_mac));
     }
-     // Ignore other messages or messages received before pairing is done
+     // Ignore other messages
 }
 
 
 static void initialize_esp_now(void) {
     ESP_LOGI(TAG, "Initializing ESP-NOW for pairing");
     pairing_status = PAIRING_STATUS_INIT; // Reset status
+    memset(peer_mac_address, 0, ESP_NOW_ETH_ALEN); // Clear any previous peer MAC
 
     // 1. Initialize Wi-Fi (same as before)
+    // Ensure Wi-Fi is initialized only once if other parts of your app use it.
+    // If this is the only user, this is fine.
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    esp_err_t ret = esp_wifi_init(&cfg);
+    if (ret == ESP_ERR_NO_MEM || ret == ESP_FAIL) { // Check specific errors if needed
+        ESP_ERROR_CHECK(ret); // Halt on critical init failure
+    } else if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_init returned: %s", esp_err_to_name(ret)); // Log non-critical errors
+    }
+
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
@@ -234,59 +257,63 @@ static void initialize_esp_now(void) {
     ESP_ERROR_CHECK(esp_now_register_send_cb(esp_now_send_cb));
     ESP_ERROR_CHECK(esp_now_register_recv_cb(esp_now_recv_cb));
 
-    // 3. Add Broadcast Peer (Temporary for sending pairing messages)
+    // 3. Add Broadcast Peer (Still needed for sending initial broadcasts)
     esp_now_peer_info_t broadcast_peer_info = {};
     memcpy(broadcast_peer_info.peer_addr, broadcast_mac_address, ESP_NOW_ETH_ALEN);
     broadcast_peer_info.channel = 0; // Use current channel
     broadcast_peer_info.ifidx = WIFI_IF_STA;
     broadcast_peer_info.encrypt = false;
-    if (esp_now_add_peer(&broadcast_peer_info) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to add broadcast peer");
-        pairing_status = PAIRING_STATUS_FAIL;
-        return; // Cannot proceed
+    // Add peer if it doesn't exist
+    if (!esp_now_is_peer_exist(broadcast_mac_address)) {
+        if (esp_now_add_peer(&broadcast_peer_info) != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to add broadcast peer");
+            pairing_status = PAIRING_STATUS_FAIL;
+            // Consider if ESP-NOW should be de-initialized here
+            return; // Cannot proceed without broadcast peer
+        }
+    } else {
+         ESP_LOGI(TAG, "Broadcast peer already exists.");
     }
 
-    // 4. Start Pairing Broadcast/Listen Loop
-    ESP_LOGI(TAG, "Starting ESP-NOW pairing process (Timeout: %d ms)", ESP_NOW_PAIRING_TIMEOUT_MS);
-    pairing_status = PAIRING_STATUS_WAITING;
+
+    // 4. Start Pairing Broadcast/Listen Loop (Initiation Phase)
+    ESP_LOGI(TAG, "Starting ESP-NOW pairing initiation broadcast (Timeout: %d ms)", ESP_NOW_PAIRING_TIMEOUT_MS);
+    pairing_status = PAIRING_STATUS_WAITING; // Start in waiting state
     int64_t start_time = esp_timer_get_time();
 
-    esp_now_pairing_msg_t pairing_msg;
-    memcpy(pairing_msg.magic, ESP_NOW_PAIRING_MAGIC, sizeof(ESP_NOW_PAIRING_MAGIC));
-    memcpy(pairing_msg.mac_addr, my_mac_address, ESP_NOW_ETH_ALEN);
-
-    while (pairing_status == PAIRING_STATUS_WAITING) {
+    // Prepare the simplified pairing message
+    while (pairing_status == PAIRING_STATUS_WAITING) { // Loop only while waiting for initial contact
         // Check timeout
         if ((esp_timer_get_time() - start_time) / 1000 > ESP_NOW_PAIRING_TIMEOUT_MS) {
-            ESP_LOGW(TAG, "ESP-NOW Pairing timed out.");
-            pairing_status = PAIRING_STATUS_FAIL;
-            break; // Exit loop on timeout
+            ESP_LOGW(TAG, "ESP-NOW Pairing initiation timed out (no peer found). Will rely on receiving pairing msg.");
+            // Don't set to FAIL, just stop broadcasting. Status remains WAITING or becomes DONE if msg received.
+            break; // Exit broadcast loop on timeout
         }
 
         // Send broadcast message
-        esp_err_t send_result = esp_now_send(broadcast_mac_address, (uint8_t *)&pairing_msg, sizeof(pairing_msg));
+        esp_err_t send_result = esp_now_send(broadcast_mac_address, (uint8_t *)&pair_message, sizeof(pair_message));
         if (send_result != ESP_OK) {
             ESP_LOGE(TAG, "ESP-NOW pairing broadcast send error: %s", esp_err_to_name(send_result));
-            // Consider if this should cause failure
         } else {
-             ESP_LOGI(TAG, "Sent pairing broadcast");
+             ESP_LOGD(TAG, "Sent pairing broadcast");
         }
 
         // Wait before next broadcast (allow time for receiving)
-        // Add a small random delay to reduce collision probability if both start exactly simultaneously
         uint32_t random_delay = esp_random() % (ESP_NOW_BROADCAST_INTERVAL_MS / 5);
         vTaskDelay(pdMS_TO_TICKS(ESP_NOW_BROADCAST_INTERVAL_MS + random_delay));
     }
 
-    // 5. Cleanup Broadcast Peer (optional but good practice)
-    esp_now_del_peer(broadcast_mac_address);
+    // 5. Cleanup Broadcast Peer is NOT strictly necessary if we might receive broadcasts later,
+    // but removing it might save a tiny bit of memory if we are sure we won't broadcast again.
+    // Let's keep it for now to allow receiving broadcasts. If memory is tight, consider removing.
+    // esp_now_del_peer(broadcast_mac_address);
 
-    // 6. Final Status Check
+    // 6. Final Status Check (Reflects if pairing completed during the broadcast window)
     if (pairing_status == PAIRING_STATUS_DONE) {
-        ESP_LOGI(TAG, "ESP-NOW Pairing successful with peer: " MACSTR, MAC2STR(peer_mac_address));
+        ESP_LOGI(TAG, "ESP-NOW Pairing successful during init with peer: " MACSTR, MAC2STR(peer_mac_address));
     } else {
-        ESP_LOGE(TAG, "ESP-NOW Pairing failed.");
-        // Keep peer_mac_address zeroed out, sending logic will check pairing_status
+        ESP_LOGI(TAG, "ESP-NOW Initial pairing broadcast finished. Waiting to receive pairing message...");
+        // Status remains PAIRING_STATUS_WAITING if timeout occurred without success
     }
 }
 
@@ -693,6 +720,7 @@ static void create_keyboard_from_file(const char* filename) {
     // lv_style_set_border_width(&btn_style, 1);
     // lv_style_set_border_color(&btn_style, lv_palette_main(LV_PALETTE_BLUE));
     lv_style_set_radius(&btn_style, 3);
+    lv_style_set_pad_all(&btn_style, 0);
 
     static lv_style_t label_style;
     lv_style_init(&label_style);
@@ -757,7 +785,9 @@ static void create_keyboard_from_file(const char* filename) {
         lv_obj_set_grid_cell(btn, LV_GRID_ALIGN_STRETCH, col, col_span, LV_GRID_ALIGN_STRETCH, row, row_span);
 
         lv_obj_t *label_obj = lv_label_create(btn);
+        lv_label_set_long_mode(label_obj, LV_LABEL_LONG_WRAP);
         lv_label_set_text(label_obj, label_str);
+        lv_obj_set_width(label_obj, LV_PCT(100));
         lv_obj_add_style(label_obj, &label_style, 0);
         lv_obj_center(label_obj);
 
@@ -948,7 +978,7 @@ static void keyboard_event_cb(lv_event_t * e) {
         // --- Send Report ---
         uint8_t combined_mask = current_modifier_mask | remote_modifier_mask;
         if (code == LV_EVENT_PRESSED) {
-            ESP_LOGD(TAG, "Key Press: 0x%02X with Modifiers: 0x%02X", action->data.keycode, combined_mask);
+            ESP_LOGI(TAG, "Key Press: 0x%02X with Modifiers: 0x%02X c: 0x%02X | r: 0x%02X", action->data.keycode, combined_mask, current_modifier_mask, remote_modifier_mask);
             if (action->data.keycode != 0) { // Don't send press for 'no key' (0x00)
                 uint8_t keycode_array[1] = { action->data.keycode };
                 esp_hidd_send_keyboard_value(hid_conn_id, combined_mask, keycode_array, 1);
