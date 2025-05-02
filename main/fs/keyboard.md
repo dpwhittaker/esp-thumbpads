@@ -1,15 +1,16 @@
-# Thumbpad Keyboard Configuration Language v3.2
+# Thumbpad Keyboard Configuration Language v3.4
 
 ## 1. Introduction
 
-This document describes the configuration file format (v3.2) used to define keyboard layouts and actions for the ESP32 Thumbpad device. This format allows for defining button appearance, grid layout, and complex HID keyboard actions including **sequential character typing (`"string"`)**, **simultaneous key presses (`'keys'`)**, default and explicit delays using `(<ms>)` syntax, toggles, modifiers with defined persistence, explicit modifier release (`\MOD`), and explicit key release control (`|`).
+This document describes the configuration file format (v3.4) used to define keyboard layouts and actions for the ESP32 Thumbpad device. This format allows for defining button appearance, grid layout (explicitly or automatically with optional sizing), and complex HID keyboard actions including **sequential character typing (`"string"`)**, **simultaneous key presses (`'keys'`)**, default and explicit delays using `(<ms>)` syntax, toggles, modifiers with defined persistence, explicit modifier release (`\MOD`), and explicit key release control (`|`).
 
-**Key changes in v3.2:**
-*   Reintroduced **default delay**, specified in the grid definition using `(<ms>)` syntax, applied between sequential components unless overridden by an explicit `(<ms>)`.
-*   Clarified **modifier persistence**: Modifiers apply to their component and persist for subsequent sequential components in the same press sequence unless explicitly released (`\MOD`) or overridden.
-*   Refined **typing sequence (`"string"`) modifier behavior**: Prefixed modifiers are held *during* the typing sequence and released *after* it completes (unless persistence rules dictate otherwise). This enables shortcuts like `LC"kd"` (Ctrl+K, D).
-*   Introduced **explicit modifier release (`\MOD`)**: Allows releasing specific modifiers mid-sequence (e.g., `\LC`).
-*   Single quotes (`'keys'`) enclose one or more characters for simultaneous key presses.
+**Key changes in v3.4:**
+*   The **GridInfo** specifier is now **optional** and can be **0, 2, or 4 digits**:
+    *   **0 digits (omitted)**: Auto-place a **1x1** button.
+    *   **2 digits (`ColSpan RowSpan`)**: Auto-place a button with the specified **span**.
+    *   **4 digits (`Col ColSpan Row RowSpan`)**: Explicit placement and span.
+*   The Toggle specifier (`T`) remains at the beginning of the line.
+*   Default delay, modifier persistence, `\MOD` release, `'keys'` simultaneous press, and `"string"` typing behavior remain as defined in v3.2.
 
 ## 2. File Format Overview
 
@@ -19,21 +20,30 @@ Configuration files are plain text files (.cfg).
     *   **Grid Definition**: `<Cols>x<Rows>[ (<DefaultDelayMS>)]`
         *   `<Cols>`: Number of columns in the grid (e.g., 5).
         *   `<Rows>`: Number of rows in the grid (e.g., 4).
-        *   `(<DefaultDelayMS>)` (Optional): Overrides the global default delay (typically 50ms) for sequential actions within this file. Example: `5x4 (20)` sets the default delay to 20ms for this layout. **Note the parenthesis syntax.**
+        *   `(<DefaultDelayMS>)` (Optional): Overrides the global default delay (50ms) for sequential actions within this file. Example: `5x4 (20)` sets the default delay to 20ms.
 *   **Button Definitions**: Button Definitions or Comments
-    *   Button Definition: `<GridInfo><Label>\t[T]<ActionString>`
-        *   `<GridInfo>`: 4 digits specifying position and span: Col ColSpan Row RowSpan (e.g., 0111 = Col 0, Span 1; Row 1, Span 1). Spans must be at least 1.
-        *   `<Label>`: Text displayed on the button (UTF-8 allowed).
+    *   Button Definition: `[T][<GridInfo>]<Label>\t<ActionString>`
+        *   `T` (Optional): If present as the *first character* on the line, changes the button interaction to Toggle mode (see Section 4.2).
+        *   `<GridInfo>` (Optional): 0, 2, or 4 digits specifying placement and/or span. Must appear immediately after `T` if `T` is present.
+            *   **Omitted (0 digits)**: Button defaults to 1x1 span and is auto-placed.
+            *   **2 digits (`ColSpan RowSpan`)**: Button has the specified span (e.g., `21` for 2x1) and is auto-placed. Both digits must be >= 1.
+            *   **4 digits (`Col ColSpan Row RowSpan`)**: Button is explicitly placed at `Col`, `Row` with the specified span. All span digits must be >= 1.
+        *   `<Label>`: Text displayed on the button (UTF-8 allowed). Starts immediately after `T` (if present) and `GridInfo` (if present).
         *   `\t`: A literal tab character separates the Label from the ActionString.
-        *   `T` (Optional): If present immediately after the tab, changes the button interaction to Toggle mode (see Section 4.2).
         *   `<ActionString>`: Defines the HID action (see Section 4).
 *   **Comment**: Lines starting with `#` are ignored.
 *   **Empty Lines**: Ignored.
 
-## 3. Grid and Label
+## 3. Grid, Label, and Placement
 
-*   **Grid**: Defines the button layout using `Cols` and `Rows`. Buttons are placed using 0-based Col/Row indices and span `ColSpan`/`RowSpan` cells.
+*   **Grid**: Defines the overall button layout dimensions using `Cols` and `Rows`.
 *   **Label**: The text shown on the button. Keep labels concise for readability.
+*   **Placement**:
+    *   **Explicit Placement (4-digit GridInfo)**: If `<GridInfo>` (`Col ColSpan Row RowSpan`) is provided, the button is placed at the specified `Col`, `Row` and occupies `ColSpan` x `RowSpan` cells. Overlapping buttons defined explicitly result in an error.
+    *   **Automatic Placement (0 or 2-digit GridInfo)**:
+        *   **Span**: If `<GridInfo>` is omitted (0 digits), the span defaults to 1x1. If `<GridInfo>` is 2 digits (`ColSpan RowSpan`), the button uses that span.
+        *   **Position**: The system places the button's top-left corner in the first available cell (searching row-major: left-to-right, then top-to-bottom) where the button's entire `ColSpan` x `RowSpan` area fits without overlapping any previously placed buttons (either explicit or auto-placed).
+        *   If no suitable slot is found for the required span, it results in an error.
 
 ## 4. Action String Syntax
 
@@ -104,8 +114,8 @@ The `<ActionString>` defines what happens when a button is interacted with. It's
     *   Touch Release:
         *   If no `|`: Sends release for all keys/modifiers activated *and left held* at the end of the `<Press Sequence>`. (Note: Keys/modifiers from `"` typing sequences are usually already released unless they persist).
         *   If `|`: Triggers the execution of the `<Release Sequence>`.
-*   **Toggle (`T` prefix)**:
-    *   Format: `<GridInfo><Label>\tT<ActionString>`
+*   **Toggle (`T` prefix at start of line)**:
+    *   Format: `T[<GridInfo>]<Label>\t<ActionString>`
     *   **First Click (Press & Release)**:
         *   Executes the **`<Press Sequence>`**.
         *   Button visually highlights. System tracks keys/modifiers left active (held) at the end of the sequence.
@@ -174,67 +184,96 @@ The `<ActionString>` defines what happens when a button is interacted with. It's
 
 ## 5. Execution Flow Summary
 
-1.  **Parse**: Check syntax. Determine Mode (T/Momentary). Store default delay from grid definition.
-2.  **Touch Press**:
-    *   Handle `|` prefix (`|Modifiers`, `|X`) if present.
-    *   If Momentary: Execute `<Press Sequence>` (respecting default/explicit delays and modifier persistence).
-    *   If Toggle: Do nothing (wait for release/click).
-3.  **Touch Release**:
-    *   If Momentary:
-        *   No `|`: Release keys/modifiers left held at the end of `<Press Sequence>`.
-        *   Has `|`: Execute `<Release Sequence>` (after optional `|(<ms>)`, respecting delays).
-    *   If Toggle (`T`):
-        *   If OFF: Execute `<Press Sequence>`, set state ON (highlight), track held keys/modifiers at sequence end.
-        *   If ON:
-            *   No `|`: Release keys/modifiers left held by `<Press Sequence>`.
-            *   Has `|`: Execute `<Release Sequence>` (after optional `|(<ms>)`).
-            *   Set state OFF (unhighlight).
+1.  **Parse**: Check syntax line by line.
+    *   Check for leading `T`.
+    *   Check if next characters are digits (GridInfo).
+        *   If 4 digits: Store explicit placement (`Col`, `Row`) and span (`ColSpan`, `RowSpan`). Mark as explicitly placed.
+        *   If 2 digits: Store span (`ColSpan`, `RowSpan`). Mark for auto-placement with specified span.
+        *   If 0 digits (no digits follow `T` or at start): Default span to 1x1. Mark for auto-placement with 1x1 span.
+    *   Extract Label up to `\t`.
+    *   Parse ActionString.
+    *   Store default delay from grid definition.
+2.  **Layout Calculation**: After parsing all buttons, resolve auto-placements. Iterate through the grid cells (row-major). For each auto-placed button (in definition order), find the first empty cell (`r`, `c`) where the button's `ColSpan` x `RowSpan` rectangle fits within the grid boundaries and doesn't overlap any previously placed buttons (explicit or auto). Assign (`r`, `c`) as the button's top-left position. Check for explicit placement overlaps. Report errors if overlaps occur or if auto-placement fails.
+3.  **Runtime Execution**:
+    *   **Touch Press**:
+        *   Handle `|` prefix (`|Modifiers`, `|X`) if present.
+        *   If Momentary: Execute `<Press Sequence>` (respecting default/explicit delays and modifier persistence).
+        *   If Toggle: Do nothing (wait for release/click).
+    *   **Touch Release**:
+        *   If Momentary:
+            *   No `|`: Release keys/modifiers left held at the end of `<Press Sequence>`.
+            *   Has `|`: Execute `<Release Sequence>` (after optional `|(<ms>)`, respecting delays).
+        *   If Toggle (`T`):
+            *   If OFF: Execute `<Press Sequence>`, set state ON (highlight), track held keys/modifiers at sequence end.
+            *   If ON:
+                *   No `|`: Release keys/modifiers left held by `<Press Sequence>`.
+                *   Has `|`: Execute `<Release Sequence>` (after optional `|(<ms>)`).
+                *   Set state OFF (unhighlight).
+    *   **Layout Change (`G<file>`)**: Triggered after preceding actions complete.
 
-4.  **Layout Change (`G<file>`)**: Triggered after preceding actions complete.
+## 6. Examples (v3.4 Syntax)
 
-## 6. Examples
+*Assume a 5x4 grid and default delay of 50ms unless specified otherwise.*
 
-*Assume a default delay of 50ms unless the grid definition specifies otherwise (e.g., `5x4 (20)`).*
-
-*   **Simple Key Press**:
-    *   `'q'` (Momentary): Press 'q', release 'q' on lift.
-    *   `T'q'` (Toggle): Click 1: Press 'q', highlight. Click 2: Release 'q', unhighlight.
+*   **Explicit Placement (4 digits)**:
+    *   `0101A\t'a'` (Momentary, Col 0, Row 0, 1x1, Label "A", Action 'a')
+    *   `T1211Ctrl\tLC` (Toggle, Col 1, Row 1, 2x1, Label "Ctrl", Action LC)
+*   **Auto Placement - Default Span (0 digits)**:
+    *   `Q\t'q'` (Momentary, 1x1, placed in first free slot, Label "Q", Action 'q')
+    *   `TW\t'w'` (Toggle, 1x1, placed in next free slot, Label "W", Action 'w')
+    *   `E\t'e'`
+    *   `R\t'r'`
+    *   `T\t't'`
+    *   `Y\t'y'`
+    *   *(... and so on, filling the grid row by row)*
+*   **Auto Placement - Specified Span (2 digits: `ColSpan RowSpan`)**:
+    *   `21Enter\t{ENTER}` (Auto-placed 2x1 button, Label "Enter")
+    *   `12Shift\tLS` (Auto-placed 1x2 button, Label "Shift")
+    *   `T22BigToggle\t"Toggle Me"` (Toggle, Auto-placed 2x2 button)
+*   **Mixed Placement Example**:
+    ```
+    5x4 (20) # 5 columns, 4 rows, 20ms default delay
+    # Explicit placements first
+    0100A\t'a'
+    1100B\t'b'
+    4100C\t'c'
+    0110D\t'd'
+    # Auto placements fill the gaps
+    E\t'e'      # Auto 1x1 -> likely at 2,0
+    F\t'f'      # Auto 1x1 -> likely at 3,0
+    21G HI\t"gh" # Auto 2x1 -> likely at 1,1 (spanning 1,1 and 2,1)
+    J\t'j'      # Auto 1x1 -> likely at 3,1
+    K\t'k'      # Auto 1x1 -> likely at 4,1
+    22Big\t' '   # Auto 2x2 -> likely at 0,2 (spanning 0,2 1,2 0,3 1,3)
+    L\t'l'      # Auto 1x1 -> likely at 2,2
+    ```
 *   **Simultaneous Press**:
-    *   `'qwe'` (Momentary): Press Q,W,E, release Q,W,E on lift.
-    *   `T'qwe'` (Toggle): Click 1: Press Q,W,E, highlight. Click 2: Release Q,W,E, unhighlight.
-    *   `LCLA{DEL}` (Momentary): Press LC+LA+DEL, release LC+LA+DEL on lift.
+    *   `0101Cut\tLC'x'` (Explicit placement)
+    *   `Copy\tLC'c'` (Auto placement 1x1)
+    *   `Paste\tLC'v'` (Auto placement 1x1)
 *   **Sequential Key Presses**:
-    *   `'q' (10) 'w' (100) 'e'` (Momentary): Press Q, 10ms, Press W, 100ms, Press E. Release Q,W,E on lift.
-    *   `'q' 'w' 'e'` (Momentary): Press Q, 50ms (default), Press W, 50ms, Press E. Release Q,W,E on lift.
+    *   `Seq\t'q' (10) 'w' (100) 'e'` (Auto placement 1x1)
+    *   `SeqDef\t'q' 'w' 'e'` (Auto placement 1x1, uses default delay)
 *   **Typing Strings**:
-    *   `"Hello"` (Momentary): Types H, 50ms, e, 50ms, l, 50ms, l, 50ms, o.
-    *   `T"Hello"` (Toggle): Click 1: Types "Hello", highlights. Click 2: Unhighlights.
-    *   `"sudo apt update{ENTER}"` (Momentary): Types command + Enter with default delays.
+    *   `Greet\t"Hello World!"` (Auto placement 1x1)
+    *   `TCode\t"if (x > 0) {NL}{TAB}// TODO{NL}"` (Toggle, Auto placement 1x1)
 *   **Modifiers & Persistence**:
-    *   `LS'1'` (Momentary): Press LS+1 (sends '!'), release LS+1 on lift.
-    *   `LS"hello"` (Momentary): Types 'H', 50ms, 'E', 50ms, 'L', 50ms, 'L', 50ms, 'O'. (LS released after 'O').
-    *   `LC"c"` (Momentary): Simulates Ctrl+C (Press LC, Press c, Release c, 50ms, Release LC).
-    *   `T LC'a'` (Toggle): Click 1: Press LC+a, highlight. Click 2: Release a, Release LC, unhighlight.
-    *   `LC'a' 'b'` (Momentary): Press LC+a, 50ms, Press b (LC held). Release LC,a,b on lift.
-    *   `LC'a' \LC 'b'` (Momentary): Press LC+a, 50ms, Release LC, 50ms, Press b. Release b on lift.
-*   **Complex Shortcut (Ctrl+K, D)**:
-    *   `LC"kd"` (Momentary): Press LC, (Press K, Release K, 50ms), (Press D, Release D, 50ms), Release LC.
-*   **Mixed Sequences**:
-    *   `LC'c' (100) LC'v'` (Momentary): Press Ctrl+C, wait 100ms, Press Ctrl+V. Release Ctrl, C, V on lift.
-    *   `"File: " LS'f' {RIGHT} (50) "{ENTER}"` (Momentary): Types "File: ", 50ms, presses Shift+F, 50ms, presses Right Arrow, wait 50ms, types "{ENTER}".
+    *   `Shift1\tLS'1'` (Auto placement 1x1, sends '!')
+    *   `CapsHello\tLS"hello"` (Auto placement 1x1, sends 'HELLO')
+    *   `CtrlK D\tLC"kd"` (Auto placement 1x1, sends Ctrl+K, D sequence)
+    *   `CtrlA B\tLC'a' 'b'` (Auto placement 1x1, sends Ctrl+A, then Ctrl+B)
+    *   `CtrlA then B\tLC'a' \LC 'b'` (Auto placement 1x1, sends Ctrl+A, then just B)
 *   **Explicit Release**:
-    *   `'A' (500) | 'A'` (Momentary): Press A, hold min 500ms. On lift: 50ms delay, Release A.
-    *   `T'A' (500) |(20) 'A'` (Toggle): Click 1: Press A, wait 500ms, highlight. Click 2: wait 20ms, Release A, unhighlight.
-    *   `LS'c' |(0) 'c' LS` (Momentary): Press Shift+C. On lift: no delay, Release C, 50ms delay, Release Shift.
-    *   `LC'k' 'd' | 'd' (0) 'k' (0) LC` (Momentary): Press LC+K, 50ms, Press D (LC held). On lift: 50ms, Release D, 0ms, Release K, 0ms, Release LC.
+    *   `HoldA\t'A' (500) | 'A'` (Auto placement 1x1)
+    *   `T HoldA\tT'A' (500) |(20) 'A'` (Toggle, Auto placement 1x1)
 *   **Release Control & Layout Change**:
-    *   `|LSLG Gmenu.cfg`: Release LS, Release LG, then Go to menu.cfg.
-    *   `|X Gmain.cfg`: Release all, reset toggles, clear remote mods, then Go to main.cfg.
-    *   `"Done." (500) Gmain.cfg`: Type "Done.", wait 500ms, Go to main.cfg.
+    *   `Panic\t|X Gmain.cfg` (Auto placement 1x1)
+    *   `Done\t"Done." (500) Gmain.cfg` (Auto placement 1x1)
+
 
 ## Appendix A: Special Key Names (`{NAME}`) and Modifier Codes (Prefixes)
 
-**(Appendix content remains the same as v3.1 - listing Modifier Codes and Special Key Names with Hex codes)**
+**(Appendix content remains the same as v3.2 - listing Modifier Codes and Special Key Names with Hex codes)**
 
 **Modifier Codes (Prefixes & Release):**
 
