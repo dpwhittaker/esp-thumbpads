@@ -1,223 +1,259 @@
-# Thumbpad Keyboard Configuration Language v3.7
+# Thumbpad Keyboard Configuration Language v3.11
 
 ## 1. Introduction
 
-This document describes the configuration file format (v3.7) used to define keyboard layouts and actions for the ESP32 Thumbpad device. This format allows for defining button appearance (including **font size**), grid layout (explicitly or automatically with optional sizing), and complex HID keyboard actions including **sequential character typing (`"string"`)**, **simultaneous key presses (`'keys'`)**, default and explicit delays using `(<ms>)` syntax, toggles, modifiers with defined persistence, explicit modifier release (`\MOD`), and explicit key release control (`|`).
+This document describes the configuration file format (v3.11) used to define keyboard layouts and actions for the ESP32 Thumbpad device. This format allows for defining button appearance (including **font size** and **icon codes**), grid layout (explicitly or automatically with optional sizing), and complex HID keyboard actions including **sequential character typing (`"string"`)**, **simultaneous key presses (`'keys'`)**, default and explicit delays using `(<ms>)` syntax, toggles, modifiers with defined persistence, explicit modifier release (`\MOD`), and explicit key release control (`|`).
 
-**Key changes in v3.7:**
-*   The **4-digit GridInfo** order is now **`Col Row ColSpan RowSpan`**.
-*   The Label text remains preceded by a mandatory font size specifier (`S`, `M`, or `L`).
-*   The GridInfo specifier remains optional (0, 2, or 4 digits).
-*   The Toggle specifier (`T`) remains at the beginning of the line.
-*   Default delay, modifier persistence, `\MOD` release, `'keys'` simultaneous press, and `"string"` typing behavior remain as defined previously.
+**Key changes in v3.11:**
+*   Changed escape sequence for a literal dollar sign in label text to **`$$`** (instead of `\$`).
+*   Removed the need for `\\` escape sequence within label text. (Backslash `\` is only special in the Action String for `\MOD`).
+*   Clarified parsing rule for **Icon Codes (`$<Name>`)**: Uses **longest match** based on Appendix B.
+*   Added **Jumbo (`J`) font size**.
+*   The **4-digit GridInfo** order is **`Col Row ColSpan RowSpan`**.
+*   The **Label** text is preceded by a **mandatory font size specifier (`S`, `M`, `L`, or `J`)**.
+*   The **GridInfo** specifier remains optional (0, 2, or 4 digits).
+*   The **Toggle** specifier (`T`) remains at the beginning of the line.
 
 ## 2. File Format Overview
 
-Configuration files are plain text files (.cfg).
+Configuration files are plain text files (.cfg), typically UTF-8 encoded.
 
-*   First Line (Mandatory): Grid Definition
-    *   **Grid Definition**: `<Cols>x<Rows>[ (<DefaultDelayMS>)]`
-        *   `<Cols>`: Number of columns in the grid (e.g., 5).
-        *   `<Rows>`: Number of rows in the grid (e.g., 4).
-        *   `(<DefaultDelayMS>)` (Optional, default 50): Overrides the global default delay (50ms) for sequential actions within this file. Example: `5x4 (20)` sets the default delay to 20ms.
-*   **Button Definitions**: Button Definitions or Comments
-    *   Button Definition: `[T][<GridInfo>]<FontSize><LabelText>\t<ActionString>`
-        *   `T` (Optional): If present as the *first character* on the line, changes the button interaction to Toggle mode (see Section 4.2).
-        *   `<GridInfo>` (Optional): 0, 2, or 4 digits specifying placement and/or span. Must appear immediately after `T` if `T` is present.
-            *   **Omitted (0 digits)**: Button defaults to 1x1 span and is auto-placed.
-            *   **2 digits (`ColSpan RowSpan`)**: Button has the specified span (e.g., `21` for 2x1) and is auto-placed. Both digits must be >= 1.
-            *   **4 digits (`Col Row ColSpan RowSpan`)**: Button is explicitly placed at `Col`, `Row` with the specified span. Example: `0011` = Col 0, Row 0, Span 1x1. All span digits must be >= 1. **(Order changed in v3.7)**
-        *   `<FontSize>` (Mandatory): A single character specifying the font size for the label:
-            *   `S`: Small font, suitable for multiple lines or longer labels on a 1x1 button.
-            *   `M`: Medium font, standard readability, suitable for 1-3 short lines on a 1x1 button.
-            *   `L`: Large font, suitable for short labels (e.g., 1-2 lines of ~4 chars) on a 1x1 button.
-            *   `J`: Jumbo font, optimized for displaying a single large character on a 1x1 button.
-        *   `<LabelText>` (Mandatory): The text displayed on the button (UTF-8 allowed). Starts immediately after the `<FontSize>` specifier. Example: `SOK`, `MCtrl`, `L->`.
-        *   `\t`: A literal tab character separates the LabelText from the ActionString.
-        *   `<ActionString>`: Defines the HID action (see Section 4).
-*   **Comment**: Lines starting with `#` are ignored.
-*   **Empty Lines**: Ignored.
+*   **First Line (Mandatory): Grid Definition**
+    *   **Syntax**: `<Cols>x<Rows>[ (<DefaultDelayMS>)]`
+    *   **`<Cols>`**: An integer specifying the number of columns in the button grid (e.g., `5`).
+    *   **`<Rows>`**: An integer specifying the number of rows in the button grid (e.g., `4`).
+    *   **`(<DefaultDelayMS>)`**: (Optional) Overrides the global default delay (typically 50ms) used between sequential actions within this specific layout file. The value is specified in milliseconds within parentheses. If omitted, the global default is used.
+        *   Example: `5x4` (5 columns, 4 rows, default delay)
+        *   Example: `10x2 (20)` (10 columns, 2 rows, 20ms default delay for this file)
+
+*   **Button Definitions**: Subsequent lines define buttons or are comments/empty.
+    *   **Syntax**: `[T][<GridInfo>]<FontSize><LabelText>\t<ActionString>`
+    *   **`T`**: (Optional) If present as the *very first character* on the line, this button operates in **Toggle** mode. If absent, the button operates in **Momentary** mode (see Section 4.2).
+    *   **`<GridInfo>`**: (Optional) Specifies the button's placement and/or size. Must appear immediately after `T` if `T` is present. Can be:
+        *   **Omitted (0 digits)**: The button defaults to a **1x1 span** and its position is determined automatically by the layout engine (see Section 3).
+        *   **2 digits (`ColSpan RowSpan`)**: The button uses the specified column span (`ColSpan`) and row span (`RowSpan`). Both digits must be 1 or greater. The button's position is determined automatically. Example: `21` defines a 2-column wide, 1-row high button.
+        *   **4 digits (`Col Row ColSpan RowSpan`)**: Explicitly defines the button's top-left corner position (`Col`, `Row` - 0-indexed) and its span (`ColSpan`, `RowSpan`). All span digits must be 1 or greater. Example: `0011` places a 1x1 button at the top-left (Column 0, Row 0). Example: `1121` places a 2x1 button starting at Column 1, Row 1.
+    *   **`<FontSize>`**: (Mandatory) A single character specifying the font size for the label text:
+        *   `S`: Small font, suitable for multiple lines or longer labels on a 1x1 button.
+        *   `M`: Medium font, standard readability, suitable for 1-3 short lines on a 1x1 button.
+        *   `L`: Large font, suitable for short labels (e.g., 1-2 lines of ~4 chars) on a 1x1 button.
+        *   `J`: Jumbo font, optimized for displaying a single large character or icon on a 1x1 button.
+    *   **`<LabelText>`**: (Mandatory) The text content displayed on the button. It starts immediately after the `<FontSize>` character. This text can contain:
+        *   Standard printable ASCII characters.
+        *   **Icon Codes (`$<Name>`)**: Special codes starting with `$` that are replaced by glyphs from a built-in icon font (see Appendix B). Parsing uses a **longest match** rule against Appendix B.
+        *   **Literal Dollar Sign (`$$`)**: The sequence `$$` is rendered as a single literal `$` character.
+        *   Example: `SOK`, `MCtrl`, `L$LEFT Arrow`, `J$OK`, `M$SAVEFile`, `SPrice: $$5`.
+    *   **`\t`**: A literal tab character. This is crucial as it separates the button's visual definition (Toggle, GridInfo, FontSize, LabelText) from its functional definition (`<ActionString>`).
+    *   **`<ActionString>`**: Defines the HID keyboard actions performed by the button (see Section 4).
+
+*   **Comment**: Lines starting with a hash symbol (`#`) are ignored by the parser.
+*   **Empty Lines**: Blank lines (containing only whitespace or nothing) are ignored.
 
 ## 3. Grid, Label, and Placement
 
-*   **Grid**: Defines the overall button layout dimensions using `Cols` and `Rows`.
-*   **Label**: The text shown on the button, specified by `<FontSize><LabelText>`. The `<FontSize>` (`S`, `M`, `L`, or `J`) determines the font used for rendering `<LabelText>`. Keep labels concise, especially with larger fonts.
-*   **Placement**:
-    *   **Explicit Placement (4-digit GridInfo)**: If `<GridInfo>` (`Col Row ColSpan RowSpan`) is provided, the button is placed at the specified `Col`, `Row` and occupies `ColSpan` x `RowSpan` cells. Overlapping buttons defined explicitly result in an error. **(Order changed in v3.7)**
-    *   **Automatic Placement (0 or 2-digit GridInfo)**:
-        *   **Span**: If `<GridInfo>` is omitted (0 digits), the span defaults to 1x1. If `<GridInfo>` is 2 digits (`ColSpan RowSpan`), the button uses that span.
-        *   **Position**: The system places the button's top-left corner in the first available cell (searching row-major: left-to-right, then top-to-bottom) where the button's entire `ColSpan` x `RowSpan` area fits without overlapping any previously placed buttons (either explicit or auto-placed).
-        *   If no suitable slot is found for the required span, it results in an error.
+*   **Grid**: The `Cols`x`Rows` definition sets the fundamental grid structure for button placement.
+*   **Label**: Defined by `<FontSize><LabelText>`.
+    *   The `<FontSize>` character (`S`, `M`, `L`, `J`) selects the font size used for rendering.
+    *   The `<LabelText>` provides the content. The rendering engine interprets standard ASCII characters directly, replaces recognized `$Name` codes (using longest match) with icon glyphs from Appendix B, and replaces `$$` sequences with a single `$` character. Text wrapping may occur depending on the button size, font size, and label length.
+*   **Placement**: Determines where a button appears on the screen.
+    *   **Explicit Placement (4-digit GridInfo: `Col Row ColSpan RowSpan`)**: Provides full control. The button's top-left corner is at (`Col`, `Row`), and it occupies `ColSpan` columns and `RowSpan` rows. Defining buttons that explicitly overlap results in a configuration error.
+    *   **Automatic Placement (0 or 2-digit GridInfo)**: Offers convenience by letting the system find a suitable spot.
+        *   **Span**: Determined by the 2-digit `ColSpan RowSpan` if provided, otherwise defaults to 1x1 if GridInfo is omitted.
+        *   **Position**: The layout engine searches the grid cells in row-major order (left-to-right across columns, then top-to-bottom across rows). It places the button's top-left corner in the first empty cell (`r`, `c`) where the button's entire `ColSpan` x `RowSpan` area fits within the grid boundaries and does not overlap any previously placed button (whether placed explicitly or automatically earlier in the file).
+        *   **Error**: If the engine cannot find a suitable empty space for an auto-placed button of the required size, a configuration error occurs.
 
 ## 4. Action String Syntax
 
-The `<ActionString>` defines what happens when a button is interacted with. It's composed of sequential *Action Components*. Spaces separate sequential components, implying the **default delay** between them unless an explicit `(<ms>)` component is used.
+The `<ActionString>` defines the sequence of HID events generated when the button is interacted with. It consists of one or more *Action Components* separated by spaces. Spaces imply the **default delay** (defined in the grid header or globally) between the completion of one component and the start of the next, unless an explicit delay `(<ms>)` is used.
 
 *   **Overall Structure**: `<Press Sequence>[|[<ms>] <Release Sequence>]`
-*   **Action Components**: The building blocks of sequences. Can be:
-    *   Simultaneous Key Press Literal (`'keys'`)
-    *   Special Key Name (`{KEY}`)
-    *   Typing Sequence (`"string"`)
-    *   Modifier (`LC`, `LS`, etc.) - *Acts as a prefix and persists*
-    *   Explicit Modifier Release (`\LC`, `\LS`, etc.)
-    *   Delay (`(<ms>)`)
-    *   Layout Change (`G<file>`)
-    *   Release Control (`|` prefix) - *Only at the very start*
+    *   **`<Press Sequence>`**: The sequence of actions executed on the initial press (Momentary) or the first click (Toggle).
+    *   **`|`**: (Optional) A pipe character separating the Press Sequence from the Release Sequence. If present, it enables explicit control over key/modifier releases.
+    *   **`[(<ms>)]`**: (Optional, only if `|` is present) An explicit delay in milliseconds, enclosed in parentheses, executed *after* the release trigger (touch release or second toggle click) but *before* the `<Release Sequence>` begins. If omitted, the default delay applies here.
+    *   **`<Release Sequence>`**: (Optional, only if `|` is present) The sequence of actions executed on touch release (Momentary) or the second click (Toggle). Typically used to release specific keys or modifiers held during the Press Sequence.
+
+*   **Action Components**: The fundamental building blocks within Press or Release Sequences.
+    *   `'keys'` (Simultaneous Key Press Literal)
+    *   `{KEY}` (Special Key Name)
+    *   `"string"` (Typing Sequence)
+    *   `LC`, `LS`, etc. (Modifier Code Prefix)
+    *   `\LC`, `\LS`, etc. (Explicit Modifier Release)
+    *   `(<ms>)` (Explicit Delay)
+    *   `G<file>` (Layout Change)
+    *   `|` prefix (Release Control - only at the very start of the entire ActionString)
 
 ### 4.1. Action Components Defined
 
 *   **Simultaneous Key Press Literal (`'`)**:
-    *   Syntax: One or more printable ASCII characters enclosed in single quotes (`'keys'`).
-    *   Action: Represents **simultaneously pressing** the single, base HID keycodes for *all* characters within the quotes (US QWERTY assumed). **Does NOT perform an implicit release.**
-    *   Purpose: Used for pressing multiple specific keys together, especially for shortcuts or holding keys.
-    *   Case is ignored for keycode mapping (`'q'` and `'Q'` both press keycode `0x14`). To send an uppercase 'Q', use `LS'q'` or `LS'Q'`.
-    *   Example: `'q'` (Press key 0x14), `' '` (Press Space 0x2C), `''` (Press single quote 0x34), `'qwe'` (Press Q, W, E simultaneously).
-    *   Limited to 6 non-modifier keys per simultaneous group.
+    *   **Syntax**: `'keys'` - One or more printable ASCII characters enclosed in single quotes.
+    *   **Action**: Presses the base HID keycodes corresponding to *all* characters inside the quotes *simultaneously*. These keys remain pressed until explicitly released (e.g., by the end of a Momentary action, a Toggle release, or an explicit Release Sequence).
+    *   **Details**: Case is ignored for keycode mapping (`'a'` and `'A'` both press the 'A' key). Limited to 6 simultaneous non-modifier keys by the HID standard.
+    *   **Purpose**: Defining shortcuts (like `'cv'`), holding specific keys.
+    *   **Examples**: `'a'`, `' '`, `''` (single quote key), `'abc'`.
+
 *   **Special Key Name (`{}`)**:
-    *   Syntax: Common non-printable key names or specific functions enclosed in curly braces `{}`.
-    *   Action: Represents **pressing** the single HID keycode or invoking the function for that special key. **Does NOT perform an implicit release.**
-    *   Purpose: Pressing non-character keys (Enter, F1, Del, etc.).
-    *   Example: `{DEL}` (Press Delete 0x4C), `{ENTER}` (Press Enter 0x28).
-    *   **Simultaneous Press**: Can be combined with other Special Key Names or placed inside a Simultaneous Key Press Literal *without spaces*. Example: `'c'{DEL}` (Press C and Delete simultaneously), `{CTRL}{ALT}{DEL}` (Press Ctrl, Alt, Delete simultaneously - *Note: Prefer modifier codes `LC LA {DEL}` for clarity*).
-    *   See Appendix A for supported names.
+    *   **Syntax**: `{KEY_NAME}` - A recognized special key name enclosed in curly braces (see Appendix A).
+    *   **Action**: Presses the HID keycode corresponding to the special key (e.g., Enter, F1, Delete, Arrow Keys). The key remains pressed until explicitly released.
+    *   **Purpose**: Accessing non-printable keys or keys not easily represented by single characters.
+    *   **Simultaneous Press**: Can be concatenated without spaces with other `{KEY}` or `'keys'` components (e.g., `'c'{DEL}`, `{LCTRL}{LALT}{DEL}` - though `LC LA {DEL}` is preferred).
+    *   **Examples**: `{ENTER}`, `{F1}`, `{LEFT}`, `{KP1}`.
+
 *   **Typing Sequence (`"`)**:
-    *   Syntax: One or more characters enclosed in double quotes (`"`).
-    *   Action: Represents a sequence of **press-and-release** actions for each character, simulating typing.
-    *   **Purpose**: Easily sending strings of text or complex multi-key shortcuts.
-    *   **Behavior**:
-        *   Each character is processed sequentially: Press Key(s), Release Key(s), **Default Delay**.
-        *   **Case Sensitive**: Automatically handles the Shift modifier. `"H"` sends Shift+H (press/release), `"h"` sends H (press/release).
-        *   Spaces inside quotes are typed as spaces (`"Hello World"`).
-        *   Special Key Names can be embedded: `"cat file.txt{ENTER}"` (Types 'c', 'a', 't', ' ', 'f', ..., 't', then presses+releases Enter). Uses default delay between each.
-        *   **Modifier Interaction**: If prefixed by modifier codes (e.g., `LC"kd"`), the modifier(s) are **held down** during the entire typing sequence and are **released automatically after** the sequence completes, unless modifier persistence rules (see 4.4) dictate they remain held for subsequent actions.
-    *   Example: `"Hello"` (Types 'H', delay, 'e', delay, 'l', delay, 'l', delay, 'o').
-    *   Example: `LC"kd"` (Press LC, (Press K, Release K, delay), (Press D, Release D, delay), Release LC. Simulates Ctrl+K, D shortcut).
-*   **Modifier Codes**:
-    *   Codes: `LC`, `LS`, `LA`, `LG`/`LM`, `RC`, `RS`, `RA`, `RG`/`RM`.
-    *   Usage: Placed immediately before a Key Press Literal (`'keys'`), Special Key Name (`{KEY}`), or a Typing Sequence (`"string"`) component they apply to within the `<Press Sequence>`.
-    *   **Persistence**: See Section 4.4.
+    *   **Syntax**: `"string"` - One or more characters enclosed in double quotes.
+    *   **Action**: Simulates typing the string character by character. For each character (or embedded `{KEY}`): Press Key(s) -> Release Key(s) -> Default Delay.
+    *   **Details**:
+        *   **Case Sensitive**: Automatically handles Shift. `"A"` sends Shift+A (press/release), `"a"` sends A (press/release).
+        *   **Special Keys**: `{KEY}` names can be embedded within the string (e.g., `"User:{TAB}Pass{ENTER}"`).
+        *   **Timing**: The default delay applies *between* each character's press/release cycle.
+        *   **Modifier Interaction**: If prefixed by modifiers (e.g., `LC"kd"`), the modifier is held *during* the sequence and released *after* the sequence completes (unless persistence rules apply). This allows complex shortcuts like Ctrl+K, D.
+    *   **Purpose**: Sending pre-defined text snippets, commands, or multi-step shortcuts.
+    *   **Examples**: `"Hello, World!"`, `"cd /home{ENTER}"`, `LC"kd"`.
+
+*   **Modifier Codes (Prefix)**:
+    *   **Syntax**: `LC`, `LS`, `LA`, `LG`/`LM`, `RC`, `RS`, `RA`, `RG`/`RM` (see Appendix A).
+    *   **Action**: Placed immediately *before* a `'keys'`, `{KEY}`, or `"string"` component. Presses the corresponding modifier key(s).
+    *   **Persistence**: The modifier(s) remain pressed for subsequent sequential components in the same Press Sequence unless explicitly released or overridden (see Section 4.4).
+    *   **Purpose**: Applying modifiers like Shift, Ctrl, Alt, GUI to key presses or sequences.
+    *   **Examples**: `LS'a'` (Shift+A), `LC'c'` (Ctrl+C), `LA{F4}` (Alt+F4), `LG'r'` (Win+R), `LS"hello"` (types HELLO).
+
 *   **Explicit Modifier Release (`\MOD`)**:
-    *   Syntax: A backslash (`\`) followed by a Modifier Code (e.g., `\LC`, `\LS`).
-    *   Action: Releases the specified modifier(s).
-    *   Purpose: Allows releasing a modifier mid-sequence while other keys might still be pressed or before subsequent actions that shouldn't have the modifier.
-    *   Example: `LS'a' \LS 'b'` (Press Shift+A, release Shift, press B).
+    *   **Syntax**: `\LC`, `\LS`, `\LA`, `\LG`/`\LM`, `\RC`, `\RS`, `\RA`, `\RG`/`\RM`. A backslash followed by a modifier code.
+    *   **Action**: Releases the specified modifier key(s).
+    *   **Purpose**: To release a modifier mid-sequence, allowing subsequent actions without that modifier.
+    *   **Example**: `LC'a' \LC 'b'` (Press Ctrl+A, release Ctrl, press B).
+
 *   **Explicit Delay (`(<ms>)`)**:
-    *   Syntax: Milliseconds enclosed in parentheses (e.g., `(100)`, `(5)`).
-    *   Action: Introduces a pause *after* the preceding action component completes and *before* the next sequential action component starts. **Overrides the default delay.**
-    *   Usage: Placed as a separate component in the sequence, separated by spaces.
-    *   Example: `'A' (500) "BC"` (Press A, wait 500ms, Type B, delay, Type C).
+    *   **Syntax**: `(<milliseconds>)` - An integer number of milliseconds enclosed in parentheses.
+    *   **Action**: Pauses execution for the specified duration. This pause occurs *after* the preceding component completes and *before* the next sequential component starts.
+    *   **Details**: Overrides the default delay for this specific step in the sequence.
+    *   **Purpose**: Introducing specific timing delays where needed (e.g., waiting for a UI element to appear).
+    *   **Examples**: `(100)`, `(5)`, `(1000)`.
+
 *   **Layout Change (`G<file>`)**:
-    *   Syntax: `G` followed by the filename (e.g., `Gsymbols.cfg`).
-    *   Action: Loads the specified layout file after completing any preceding actions in the current sequence component.
-    *   Example: `"logout"{ENTER} (1000) Glogin.cfg`
+    *   **Syntax**: `G<filename.cfg>` - The letter `G` followed immediately by the filename of another layout configuration file.
+    *   **Action**: After completing all preceding actions in the current sequence component, unload the current layout and load the specified layout file.
+    *   **Purpose**: Switching between different keyboard layouts (e.g., main, symbols, numpad).
+    *   **Example**: `Gsymbols.cfg`, `Gmain.cfg`.
 
 ### 4.2. Action Types & Interaction Modes
 
+Determines how the button responds to touch press and release.
+
 *   **Momentary (Default - No `T` prefix)**:
-    *   Touch Press: Initiates the `<Press Sequence>`.
-    *   Touch Release:
-        *   If no `|`: Sends release for all keys/modifiers activated *and left held* at the end of the `<Press Sequence>`. (Note: Keys/modifiers from `"` typing sequences are usually already released unless they persist).
-        *   If `|`: Triggers the execution of the `<Release Sequence>`.
+    *   **Touch Press**: Executes the `<Press Sequence>`.
+    *   **Touch Release**:
+        *   If no `|` separator: Implicitly releases all keys and modifiers that were left held at the *end* of the `<Press Sequence>`. Note that keys involved in a `"string"` sequence are typically already released by the sequence itself.
+        *   If `|` separator is present: Triggers the execution of the `<Release Sequence>` (after the optional `|(<ms>)` delay). No implicit release occurs.
+
 *   **Toggle (`T` prefix at start of line)**:
-    *   Format: `T[<GridInfo>]<FontSize><LabelText>\t<ActionString>`
-    *   **First Click (Press & Release)**:
-        *   Executes the **`<Press Sequence>`**.
-        *   Button visually highlights. System tracks keys/modifiers left active (held) at the end of the sequence.
+    *   Acts like a latching switch, alternating state with each complete click (press and release).
+    *   **First Click (Press & Release)**: Executes the `<Press Sequence>`. The button visually enters an 'active' or 'highlighted' state. The system remembers which keys/modifiers were left held at the end of the `<Press Sequence>`.
     *   **Second Click (Press & Release)**:
-        *   If `|`: Executes the `<Release Sequence>`.
-        *   If no `|`: Releases each key/modifier that was left active by the `<Press Sequence>`.
-        *   Button highlight is removed.
-    *   Subsequent clicks alternate.
+        *   If no `|` separator: Implicitly releases all keys and modifiers that were remembered from the first click's `<Press Sequence>`.
+        *   If `|` separator is present: Triggers the execution of the `<Release Sequence>` (after the optional `|(<ms>)` delay). No implicit release occurs.
+        *   The button returns to its normal visual state.
+    *   **Subsequent Clicks**: Alternate between the first and second click behaviors.
 
 ### 4.3. Sequences and Timing
 
-*   **Sequential Actions**: Separate Action Components (`'keys'`, `{KEY}`, `"string"`, `(<ms>)`, `G<file>`, `\MOD`) with one or more spaces. They execute in order.
-    *   **Default Delay**: Applies between space-separated components unless an explicit `(<ms>)` component is used. Defined by `(<ms>)` in grid definition or global default. Also applies between characters/keys within a `"string"`.
-    *   **Explicit Delays**: Use the `(<ms>)` component to introduce specific pauses, overriding the default delay for that step.
-    *   Example: `'A' 'B' 'C'` (Press A, default delay, Press B, default delay, Press C).
-    *   Example: `'A' (100) 'B' (20) 'C'` (Press A, wait 100ms, Press B, wait 20ms, Press C).
-    *   Example: `"AB" (50) 'c'` (Type A, delay, Type B, wait 50ms, Press C).
-*   **Simultaneous Press**: Use the multi-character single quote literal (`'keys'`) or concatenate Special Key Names (`{KEY}{KEY}`) without spaces. Modifiers prefix the group.
-    *   Example: `LC'qwe'` (Press Left Ctrl + Q + W + E together).
-    *   Example: `{CTRL}{ALT}{DEL}` (Press Ctrl, Alt, Delete together).
-    *   **Note**: You cannot make `"string"` components simultaneous with others. `"AB"` is typing 'A' then 'B'. `'AB'` is pressing A and B together.
+How components are executed relative to each other.
+
+*   **Sequential Actions**: Components separated by one or more spaces are executed in order from left to right.
+    *   **Default Delay**: The delay specified by `(<ms>)` in the grid definition (or the global default if unspecified) occurs *between* the completion of one space-separated component and the start of the next. This delay also applies between the press/release cycles of individual characters/keys within a `"string"` sequence.
+    *   **Explicit Delays**: Using `(<ms>)` within the sequence overrides the default delay for that specific step.
+    *   Example (`d50` default): `'a' 'b'` -> Press a, wait 50ms, Press b.
+    *   Example (`d50` default): `'a' (10) 'b'` -> Press a, wait 10ms, Press b.
+
+*   **Simultaneous Press**: Achieved by concatenating `'keys'` literals and/or `{KEY}` names *without any spaces* between them. Modifiers should prefix the entire group.
+    *   Example: `'abc'` (Press a, b, c together).
+    *   Example: `LC'ac'` (Press Left Ctrl, a, c together).
+    *   Example: `'c'{DEL}` (Press c and Delete together).
+    *   **Limitation**: `"string"` components cannot be made simultaneous with other components.
 
 ### 4.4. Modifiers and Persistence
 
-*   **Application**: Modifier codes (`LC`, `LS`, etc.) apply to the *immediately following* action component (`'keys'`, `{KEY}`, `"string"`).
-*   **Persistence Rule**: When a modifier is activated by prefixing a component, it **remains active (pressed)** for any subsequent *sequential* components within the *same* `<Press Sequence>` **unless**:
-    1.  It is explicitly released using `\MOD` (e.g., `\LC`).
-    2.  Another modifier code for the *same* modifier key (e.g., `RC` overriding `LC`, or `LC` reapplying `LC`) is encountered, resetting its state for the new component.
-    3.  The `<Press Sequence>` ends.
-*   **Release**: Modifiers still active at the end of the `<Press Sequence>` are released:
-    *   Implicitly on touch release (Momentary mode, no `|`).
-    *   Implicitly on the second click (Toggle mode, no `|`).
-    *   Explicitly via the `<Release Sequence>` if `|` is used.
-    *   Explicitly via `\MOD` components.
-*   **Typing Sequence (`"string"`) Exception**: As noted in 4.1, modifiers prefixed to a `"string"` are typically released *after* the string completes, unless followed immediately by another component that requires the same modifier (implicitly or explicitly).
+How modifier keys (Shift, Ctrl, Alt, GUI) behave in sequences.
+
+*   **Application**: A modifier code (`LC`, `LS`, etc.) applies its effect (pressing the modifier key) just before the *immediately following* action component (`'keys'`, `{KEY}`, or `"string"`).
+*   **Persistence Rule**: Once a modifier key is pressed via a modifier code prefix, it **remains held down** for any subsequent sequential components within the *same* `<Press Sequence>`, *unless* one of the following occurs:
+    1.  **Explicit Release**: An `\MOD` component (e.g., `\LC`) explicitly releases that modifier.
+    2.  **Overridden/Reapplied**: Another modifier code affecting the *same* physical key (e.g., `RC` after `LC`, or even `LC` again) is encountered. This resets the state for the new component (effectively releasing and re-pressing, or just continuing to hold if the same modifier is reapplied).
+    3.  **Sequence End**: The `<Press Sequence>` finishes.
+*   **Implicit/Explicit Release at End**: Modifiers still active when the `<Press Sequence>` concludes are released according to the button's mode and whether an explicit `<Release Sequence>` is defined (see Sections 4.2 and 4.5).
+*   **Typing Sequence (`"string"`) Exception**: Modifiers prefixed to a `"string"` component are generally held *only* for the duration of that typing sequence and are automatically released immediately after it finishes, *unless* the very next component in the sequence explicitly requires the same modifier to remain held (via persistence or another prefix). This allows `LC"kd"` to work as expected (Ctrl held only for K and D typing) while still allowing `LC"k" LC'd'` (Ctrl held for K typing, released, then Ctrl pressed again for D press).
 *   **Examples**:
-    *   `LS'a'` (Press LS, Press a. LS and a released on touch release).
-    *   `LS'a' 'b'` (Press LS, Press a, delay, Press b [LS still held]. LS, a, b released on touch release).
-    *   `LS'a' \LS 'b'` (Press LS, Press a, delay, Release LS, delay, Press b. Only b released on touch release).
-    *   `LC'a' LS'b'` (Press LC, Press a, delay, Press LS, Press b [LC still held]. LC, LS, a, b released on touch release).
-    *   `LC"kd"` (Press LC, Type K, delay, Type D, delay, Release LC).
-    *   `LC"k" 'd'` (Press LC, Type K, delay, Release LC, delay, Press D. Only D released on touch release). *This shows the "typing sequence modifier release" behavior.*
-    *   `LC'k' 'd'` (Press LC, Press K, delay, Press D [LC still held]. LC, K, D released on touch release).
+    *   `LS'a'` -> Press LS, Press a. (LS+a released at end).
+    *   `LS'a' 'b'` -> Press LS, Press a, (delay), Press b [LS still held]. (LS+a+b released at end).
+    *   `LS'a' \LS 'b'` -> Press LS, Press a, (delay), Release LS, (delay), Press b. (Only b released at end).
+    *   `LC'a' LS'b'` -> Press LC, Press a, (delay), Press LS, Press b [LC still held]. (LC+LS+a+b released at end).
+    *   `LC"kd"` -> Press LC, Type K, (delay), Type D, (delay), Release LC.
+    *   `LC"k" 'd'` -> Press LC, Type K, (delay), Release LC, (delay), Press d. (d released at end).
+    *   `LC'k' 'd'` -> Press LC, Press K, (delay), Press D [LC still held]. (LC+K+D released at end).
 
 ### 4.5. Explicit Release Sequence (`|` separator)
 
-*   Format: `<Press Sequence> |[(<ms>)] <Release Sequence>`
-*   `|`: Separates press actions from release actions.
-*   `[(<ms>)]` (Optional): Specifies a delay *after* the release trigger (touch release or toggle-off click) and *before* the first action in the `<Release Sequence>`. If omitted, the **default delay** is used. A delay component `(<ms>)` just before the `|` is simply the last part of the `<Press Sequence>`.
-*   `<Release Sequence>`: Specifies which keys and/or modifiers to release. Follows the same syntax rules as `<Press Sequence>` (using `'keys'`, `{KEY}`, `(<ms>)`, modifier codes for *release*, `\MOD` is not typically needed here but possible) but the actions are *releases*. `"string"` components are generally not useful here.
-*   **Important**: If modifiers were held during the `<Press Sequence>`, they must be explicitly listed in the `<Release Sequence>` if you want them released by this action.
-*   Triggering: Unchanged (Momentary: on release; Toggle: on second click).
-*   Example: `LS'c' |(0) 'c' LS` (Press Shift+C. On release: no delay, Release C, default delay, Release Shift).
-*   Example: `'A' (200) | 'A'` (Press A, wait 200ms minimum. On release: default delay, Release A).
-*   Example: `LC'k' 'd' | 'd' 'k' LC` (Press LC+K, delay, Press D [LC held]. On release: default delay, Release D, default delay, Release K, default delay, Release LC).
+Provides fine-grained control over what happens upon release/toggle-off.
+
+*   **Format**: `<Press Sequence> |[(<ms>)] <Release Sequence>`
+*   **`|`**: The pipe character enables this feature.
+*   **`|(<ms>)`**: An optional explicit delay occurring *after* the trigger (touch release/toggle-off) and *before* the `<Release Sequence>` starts. Uses default delay if omitted.
+*   **`<Release Sequence>`**: A sequence of Action Components defining what should happen upon release. Crucially, this sequence typically specifies which keys or modifiers (using their codes like `LC`, `LS`, `'a'`, `{DEL}`) should be *released*. It follows the same syntax rules as the `<Press Sequence>` regarding components and delays. `"string"` components are rarely useful here.
+*   **Responsibility**: If you use `|`, you are responsible for explicitly releasing *all* keys and modifiers held by the `<Press Sequence>` that you want released. No implicit release occurs for keys held from the `<Press Sequence>`.
+*   **Triggering**: Activated by touch release (Momentary mode) or the second click (Toggle mode).
+*   **Examples**:
+    *   `LS'c' |(0) 'c' LS` -> Press Shift+C. On release: 0ms delay, Release C, default delay, Release Shift.
+    *   `'A' (200) | 'A'` -> Press A, hold min 200ms. On release: default delay, Release A.
+    *   `LC'k' 'd' | 'd' (0) 'k' (0) LC` -> Press LC+K, delay, Press D [LC held]. On release: default delay, Release D, 0ms, Release K, 0ms, Release LC.
 
 ### 4.6. Release Control Prefix (`|` at start)
 
-*   Format: `|<Release Modifiers><ActionString>` or `|X<ActionString>`
-*   Release Specific Modifiers: `|LSLG Gmenu.cfg` (Release LS & LG, then go to menu.cfg).
-*   Release All Keys (`|X`):
-    *   Sends empty HID report (all keys up).
-    *   Resets toggle state of all buttons *in the currently loaded layout* to OFF.
-    *   Sends modifier update `0x00` via ESP-NOW *if paired*.
-    *   Example: `|X Gmain.cfg` (Release all, reset toggles, clear remote mods, go to main).
+Special actions executed immediately on touch *press*, primarily for resetting state.
+
+*   **Format**: `|<Release Modifiers><ActionString>` or `|X<ActionString>`
+*   **`|Modifiers`**: Placed at the very beginning. Releases the specified modifier keys *immediately* upon touch press, before any other part of the `<ActionString>` executes. Example: `|LSLG Gmenu.cfg` -> On press, release Left Shift and Left GUI, then execute `Gmenu.cfg`.
+*   **`|X`**: Placed at the very beginning. Performs a "panic" or "reset all" action immediately upon touch press:
+    1.  Sends an empty HID report (all keys and modifiers up) to the host.
+    2.  Resets the internal toggle state of *all* buttons defined in the currently loaded layout file to OFF.
+    3.  Sends a modifier update `0x00` via ESP-NOW (if paired) to clear remote modifier state.
+    4.  Proceeds to execute the rest of the `<ActionString>` (if any).
+    *   Example: `|X Gmain.cfg` -> On press, release everything, reset toggles, clear remote mods, then load `main.cfg`.
 
 ## 5. Execution Flow Summary
 
-1.  **Parse**: Check syntax line by line.
-    *   Check for leading `T`.
-    *   Check if next characters are digits (GridInfo).
-        *   If 4 digits: Store explicit placement (`Col`, `Row`) and span (`ColSpan`, `RowSpan`). Mark as explicitly placed. **(Order: Col Row ColSpan RowSpan)**
-        *   If 2 digits: Store span (`ColSpan`, `RowSpan`). Mark for auto-placement with specified span.
-        *   If 0 digits (no digits follow `T` or at start): Default span to 1x1. Mark for auto-placement with 1x1 span.
-    *   Expect mandatory Font Size character (`S`, `M`, `L`, or `J`). Store it.
-    *   Extract LabelText following the Font Size character up to the `\t`.
-    *   Expect `\t` character.
-    *   Parse ActionString.
-    *   Store default delay from grid definition.
-2.  **Layout Calculation**: After parsing all buttons, resolve auto-placements. Iterate through the grid cells (row-major). For each auto-placed button (in definition order), find the first empty cell (`r`, `c`) where the button's `ColSpan` x `RowSpan` rectangle fits within the grid boundaries and doesn't overlap any previously placed buttons (explicit or auto). Assign (`r`, `c`) as the button's top-left position. Check for explicit placement overlaps. Report errors if overlaps occur or if auto-placement fails.
-3.  **Runtime Execution**:
+1.  **Parse**: Read the `.cfg` file line by line.
+    *   Parse Grid Definition: Store `Cols`, `Rows`, `DefaultDelayMS`.
+    *   For each Button Definition line:
+        *   Check for leading `T` (Toggle mode).
+        *   Check for GridInfo (0, 2, or 4 digits). Store placement/span info and placement type (explicit/auto). Remember `Col Row ColSpan RowSpan` order for 4 digits.
+        *   Expect and store mandatory Font Size character (`S`, `M`, `L`, or `J`).
+        *   Extract LabelText up to `\t`. Parse for ASCII, `$Name` icon codes (longest match), and `$$` escapes, storing the sequence of literal segments and icon codes.
+        *   Expect `\t`.
+        *   Parse the `<ActionString>` into its sequence of Press Components and (if present) Release Components, noting explicit delays and the `|` separator.
+2.  **Layout Calculation**: After parsing all button definitions:
+    *   Place explicitly defined buttons on the grid. Check for overlaps.
+    *   Iterate through the grid cells (row-major). For each auto-placed button (in the order they appeared in the file), find the first available top-left cell (`r`, `c`) where its required span fits without overlapping existing buttons or exceeding grid boundaries. Assign the position.
+    *   Report errors if any overlaps occur or if an auto-placed button cannot fit.
+3.  **Rendering**: When drawing the UI:
+    *   For each button, use its calculated position and span.
+    *   Render the stored label sequence (literal text segments and icon codes) using the stored `FontSize`. Replace icon codes with glyphs, render `$$` as `$`. Handle text wrapping within the button bounds.
+4.  **Runtime Execution**: When a button touch event occurs:
     *   **Touch Press**:
-        *   Handle `|` prefix (`|Modifiers`, `|X`) if present.
-        *   If Momentary: Execute `<Press Sequence>` (respecting default/explicit delays and modifier persistence).
-        *   If Toggle: Do nothing (wait for release/click).
+        *   Check for `|` prefix (`|Modifiers` or `|X`) and execute immediately if present.
+        *   If Momentary mode: Execute the `<Press Sequence>`, respecting delays and modifier persistence rules.
+        *   If Toggle mode: Do nothing (wait for release).
     *   **Touch Release**:
-        *   If Momentary:
-            *   No `|`: Release keys/modifiers left held at the end of `<Press Sequence>`.
-            *   Has `|`: Execute `<Release Sequence>` (after optional `|(<ms>)`, respecting delays).
-        *   If Toggle (`T`):
-            *   If OFF: Execute `<Press Sequence>`, set state ON (highlight), track held keys/modifiers at sequence end.
-            *   If ON:
-                *   No `|`: Release keys/modifiers left held by `<Press Sequence>`.
-                *   Has `|`: Execute `<Release Sequence>` (after optional `|(<ms>)`).
-                *   Set state OFF (unhighlight).
-    *   **Layout Change (`G<file>`)**: Triggered after preceding actions complete.
+        *   If Momentary mode:
+            *   No `|`: Implicitly release keys/modifiers left held by the `<Press Sequence>`.
+            *   Has `|`: Execute the `<Release Sequence>` (after optional `|(<ms>)` delay).
+        *   If Toggle mode (`T`):
+            *   If button state is OFF: Execute `<Press Sequence>`, change state to ON, highlight button, remember held keys/modifiers.
+            *   If button state is ON:
+                *   No `|`: Implicitly release keys/modifiers remembered from the ON state activation.
+                *   Has `|`: Execute the `<Release Sequence>` (after optional `|(<ms>)` delay).
+                *   Change state to OFF, unhighlight button.
+    *   **Layout Change (`G<file>`)**: If encountered during sequence execution, load the new layout file after the current component finishes.
 
-## 6. Examples (v3.7 Syntax with `Col Row ColSpan RowSpan`)
+## 6. Examples (v3.11 Syntax)
 
 *Assume a 5x4 grid and default delay of 50ms unless specified otherwise.*
 
@@ -228,29 +264,31 @@ The `<ActionString>` defines what happens when a button is interacted with. It's
     *   `MQ\t'q'` (Momentary, 1x1, placed in first free slot, Medium Font Label "Q", Action 'q')
     *   `TMW\t'w'` (Toggle, 1x1, placed in next free slot, Medium Font Label "W", Action 'w')
     *   `ME\t'e'`
-    *   `MR\t'r'`
-    *   `MT\t't'`
-    *   `SY\t'y'` (Small font for 'Y')
-    *   *(... and so on, filling the grid row by row)*
 *   **Auto Placement - Specified Span (2 digits: `ColSpan RowSpan`)**:
     *   `21LEnter\t{ENTER}` (Auto-placed 2x1 button, Large Font Label "Enter")
     *   `12MShift\tLS` (Auto-placed 1x2 button, Medium Font Label "Shift")
     *   `T22SBig Toggle\t"Toggle Me"` (Toggle, Auto-placed 2x2 button, Small Font Label "Big Toggle")
+*   **Using Icon Codes & Escapes**:
+    *   `J$UP\t{UP}` (Jumbo Up Arrow Icon)
+    *   `M$OK OK\t{ENTER}` (Medium OK icon followed by literal " OK")
+    *   `S$SAVEFile\tLC's'` (Small Save icon followed by literal "File")
+    *   `MPrice: $$5.00\t"5.00"` (Medium font, literal "Price: $5.00")
+    *   `S$$$$ Top Price $$$$\t"'1'"` (Small font, literal "$$ Top Price $$")
 *   **Mixed Placement Example**:
     ```
-    5x4 (20) # 5 columns, 4 rows, 20ms default delay
+    5x4 (20)
     # Explicit placements first (Col Row ColSpan RowSpan)
-    0011MA\t'a'      # Col 0, Row 0, 1x1
-    1011MB\t'b'      # Col 1, Row 0, 1x1
-    4011MC\t'c'      # Col 4, Row 0, 1x1
-    0111MD\t'd'      # Col 0, Row 1, 1x1
+    0011MA\t'a'
+    1011MB\t'b'
+    4011MC\t'c'
+    0111MD\t'd'
     # Auto placements fill the gaps
     ME\t'e'      # Auto 1x1 -> likely at 2,0
     MF\t'f'      # Auto 1x1 -> likely at 3,0
-    21SG HI\t"gh" # Auto 2x1 -> likely at 1,1 (spanning 1,1 and 2,1), Small Font
+    21S$COPY Copy\tLC'c' # Auto 2x1 -> likely at 1,1, Small Font, Copy icon + " Copy"
     MJ\t'j'      # Auto 1x1 -> likely at 3,1
     MK\t'k'      # Auto 1x1 -> likely at 4,1
-    22LBig\t' '   # Auto 2x2 -> likely at 0,2 (spanning 0,2 1,2 0,3 1,3), Large Font
+    22L$HOME\t{HOME} # Auto 2x2 -> likely at 0,2, Large Font Home Icon
     ML\t'l'      # Auto 1x1 -> likely at 2,2
     ```
 *   **Simultaneous Press**:
@@ -275,14 +313,11 @@ The `<ActionString>` defines what happens when a button is interacted with. It's
 *   **Release Control & Layout Change**:
     *   `MPanic\t|X Gmain.cfg` (Auto placement 1x1)
     *   `MDone\t"Done." (500) Gmain.cfg` (Auto placement 1x1)
-*   **Jumbo Font Example**:
-    *   `J↑\t{UP}` (Auto placement 1x1, Jumbo Font Label "↑", Action Up Arrow)
-    *   `0311J✓\t{ENTER}` (Explicit placement Col 0, Row 3, 1x1, Jumbo Font Label "✓", Action Enter)
 
 
 ## Appendix A: Special Key Names (`{NAME}`) and Modifier Codes (Prefixes)
 
-**(Appendix content remains the same as v3.2 - listing Modifier Codes and Special Key Names with Hex codes)**
+**(Content remains the same as v3.7 - listing Modifier Codes and Special Key Names with Hex codes)**
 
 **Modifier Codes (Prefixes & Release):**
 
@@ -366,3 +401,68 @@ The `<ActionString>` defines what happens when a button is interacted with. It's
 | {RGUI}    | E7   | Right GUI (as key)      |
 
 *Note: Modifier codes (LC, LS etc.) act as prefixes affecting subsequent actions and persist. Special key names like {LCTRL}, {LSHIFT} represent pressing *that specific modifier key itself*, which might be needed in rare cases or for remapping.*
+
+## Appendix B: Icon Codes (`$<Name>`)
+
+Icon codes provide access to a subset of FontAwesome icons built into the default LVGL fonts. Use these codes within the `<LabelText>` part of a button definition. The rendering engine will replace the code (e.g., `$OK`) with the corresponding icon glyph.
+
+**Parsing Rule:** When parsing `<LabelText>`, the system uses a **longest match** rule. It looks for the longest possible sequence starting with `$` that matches an Icon Code name defined below. Any characters immediately following the matched code are treated as literal text.
+
+**Escape Sequence:**
+*   Use `$$` to represent a literal `$` character.
+
+| Icon Code (`$<Name>`) | LVGL Symbol Name | Description         |
+| :-------------------- | :--------------- | :------------------ |
+| `$OK`                 | `LV_SYMBOL_OK`   | Check mark          |
+| `$CANCEL`             | `LV_SYMBOL_CLOSE`| Cancel / Close (X)  |
+| `$POWER`              | `LV_SYMBOL_POWER`| Power symbol        |
+| `$SETTINGS`           | `LV_SYMBOL_SETTINGS`| Settings / Gear   |
+| `$HOME`               | `LV_SYMBOL_HOME` | Home icon           |
+| `$DOWNLOAD`           | `LV_SYMBOL_DOWNLOAD`| Download arrow    |
+| `$UPLOAD`             | `LV_SYMBOL_UPLOAD`| Upload arrow        |
+| `$TRASH`              | `LV_SYMBOL_TRASH`| Trash can           |
+| `$COPY`               | `LV_SYMBOL_COPY` | Copy icon           |
+| `$PASTE`              | `LV_SYMBOL_PASTE`| Paste icon          |
+| `$SAVE`               | `LV_SYMBOL_SAVE` | Save icon (Floppy)  |
+| `$EDIT`               | `LV_SYMBOL_EDIT` | Edit / Pencil       |
+| `$BACKSPACE`          | `LV_SYMBOL_BACKSPACE`| Backspace arrow |
+| `$LEFT`               | `LV_SYMBOL_LEFT` | Left arrow          |
+| `$RIGHT`              | `LV_SYMBOL_RIGHT`| Right arrow         |
+| `$UP`                 | `LV_SYMBOL_UP`   | Up arrow            |
+| `$DOWN`               | `LV_SYMBOL_DOWN` | Down arrow          |
+| `$EYE_OPEN`           | `LV_SYMBOL_EYE_OPEN`| Eye open          |
+| `$EYE_CLOSE`          | `LV_SYMBOL_EYE_CLOSE`| Eye closed        |
+| `$WARNING`            | `LV_SYMBOL_WARNING`| Warning / Exclamation |
+| `$SHUFFLE`            | `LV_SYMBOL_SHUFFLE`| Shuffle arrows    |
+| `$PLAY`               | `LV_SYMBOL_PLAY` | Play button         |
+| `$PAUSE`              | `LV_SYMBOL_PAUSE`| Pause button        |
+| `$STOP`               | `LV_SYMBOL_STOP` | Stop button         |
+| `$PREV`               | `LV_SYMBOL_PREV` | Previous track      |
+| `$NEXT`               | `LV_SYMBOL_NEXT` | Next track          |
+| `$PLUS`               | `LV_SYMBOL_PLUS` | Plus sign           |
+| `$MINUS`              | `LV_SYMBOL_MINUS`| Minus sign          |
+| `$VOLUME_MAX`         | `LV_SYMBOL_VOLUME_MAX`| Volume high     |
+| `$VOLUME_MID`         | `LV_SYMBOL_VOLUME_MID`| Volume medium   |
+| `$MUTE`               | `LV_SYMBOL_MUTE` | Volume muted        |
+| `$BELL`               | `LV_SYMBOL_BELL` | Bell icon           |
+| `$KEYBOARD`           | `LV_SYMBOL_KEYBOARD`| Keyboard icon     |
+| `$GPS`                | `LV_SYMBOL_GPS`  | GPS / Location      |
+| `$FILE`               | `LV_SYMBOL_FILE` | File icon           |
+| `$WIFI`               | `LV_SYMBOL_WIFI` | WiFi symbol         |
+| `$BLUETOOTH`          | `LV_SYMBOL_BLUETOOTH`| Bluetooth symbol|
+| `$LIST`               | `LV_SYMBOL_LIST` | List / Menu         |
+| `$REFRESH`            | `LV_SYMBOL_REFRESH`| Refresh / Reload  |
+| `$SD_CARD`            | `LV_SYMBOL_SD_CARD`| SD Card icon      |
+| `$USB`                | `LV_SYMBOL_USB`  | USB symbol          |
+| `$DRIVE`              | `LV_SYMBOL_DRIVE`| Drive / HDD         |
+| `$LOOP`               | `LV_SYMBOL_LOOP` | Loop arrows         |
+| `$CHARGE`             | `LV_SYMBOL_CHARGE`| Battery charging  |
+| `$BATTERY_FULL`       | `LV_SYMBOL_BATTERY_FULL`| Battery full  |
+| `$BATTERY_3`          | `LV_SYMBOL_BATTERY_3`| Battery 3/4     |
+| `$BATTERY_2`          | `LV_SYMBOL_BATTERY_2`| Battery 1/2     |
+| `$BATTERY_1`          | `LV_SYMBOL_BATTERY_1`| Battery 1/4     |
+| `$BATTERY_EMPTY`      | `LV_SYMBOL_BATTERY_EMPTY`| Battery empty |
+| `$IMAGE`              | `LV_SYMBOL_IMAGE`| Image / Picture   |
+| `$BULLET`             | `LV_SYMBOL_BULLET`| Bullet point      |
+
+*(Note: This list is based on common LVGL built-in symbols. The exact availability might depend on the specific LVGL version and configuration used in the firmware. Ensure icon names used here do not create unavoidable ambiguity with the longest match rule.)*
