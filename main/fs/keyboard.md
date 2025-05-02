@@ -1,11 +1,12 @@
-# Thumbpad Keyboard Configuration Language v3.6
+# Thumbpad Keyboard Configuration Language v3.7
 
 ## 1. Introduction
 
-This document describes the configuration file format (v3.6) used to define keyboard layouts and actions for the ESP32 Thumbpad device. This format allows for defining button appearance (including **font size**), grid layout (explicitly or automatically with optional sizing), and complex HID keyboard actions including **sequential character typing (`"string"`)**, **simultaneous key presses (`'keys'`)**, default and explicit delays using `(<ms>)` syntax, toggles, modifiers with defined persistence, explicit modifier release (`\MOD`), and explicit key release control (`|`).
+This document describes the configuration file format (v3.7) used to define keyboard layouts and actions for the ESP32 Thumbpad device. This format allows for defining button appearance (including **font size**), grid layout (explicitly or automatically with optional sizing), and complex HID keyboard actions including **sequential character typing (`"string"`)**, **simultaneous key presses (`'keys'`)**, default and explicit delays using `(<ms>)` syntax, toggles, modifiers with defined persistence, explicit modifier release (`\MOD`), and explicit key release control (`|`).
 
-**Key changes in v3.6:**
-*   The **Label** text is now preceded by a **mandatory font size specifier (`S`, `M`, or `L`)**. The square brackets `[]` are removed.
+**Key changes in v3.7:**
+*   The **4-digit GridInfo** order is now **`Col Row ColSpan RowSpan`**.
+*   The Label text remains preceded by a mandatory font size specifier (`S`, `M`, or `L`).
 *   The GridInfo specifier remains optional (0, 2, or 4 digits).
 *   The Toggle specifier (`T`) remains at the beginning of the line.
 *   Default delay, modifier persistence, `\MOD` release, `'keys'` simultaneous press, and `"string"` typing behavior remain as defined previously.
@@ -25,11 +26,12 @@ Configuration files are plain text files (.cfg).
         *   `<GridInfo>` (Optional): 0, 2, or 4 digits specifying placement and/or span. Must appear immediately after `T` if `T` is present.
             *   **Omitted (0 digits)**: Button defaults to 1x1 span and is auto-placed.
             *   **2 digits (`ColSpan RowSpan`)**: Button has the specified span (e.g., `21` for 2x1) and is auto-placed. Both digits must be >= 1.
-            *   **4 digits (`Col ColSpan Row RowSpan`)**: Button is explicitly placed at `Col`, `Row` with the specified span. All span digits must be >= 1.
+            *   **4 digits (`Col Row ColSpan RowSpan`)**: Button is explicitly placed at `Col`, `Row` with the specified span. Example: `0011` = Col 0, Row 0, Span 1x1. All span digits must be >= 1. **(Order changed in v3.7)**
         *   `<FontSize>` (Mandatory): A single character specifying the font size for the label:
-            *   `S`: Small font
-            *   `M`: Medium font (typically the default if not specified, but mandatory here)
-            *   `L`: Large font
+            *   `S`: Small font, suitable for multiple lines or longer labels on a 1x1 button.
+            *   `M`: Medium font, standard readability, suitable for 1-3 short lines on a 1x1 button.
+            *   `L`: Large font, suitable for short labels (e.g., 1-2 lines of ~4 chars) on a 1x1 button.
+            *   `J`: Jumbo font, optimized for displaying a single large character on a 1x1 button.
         *   `<LabelText>` (Mandatory): The text displayed on the button (UTF-8 allowed). Starts immediately after the `<FontSize>` specifier. Example: `SOK`, `MCtrl`, `L->`.
         *   `\t`: A literal tab character separates the LabelText from the ActionString.
         *   `<ActionString>`: Defines the HID action (see Section 4).
@@ -39,9 +41,9 @@ Configuration files are plain text files (.cfg).
 ## 3. Grid, Label, and Placement
 
 *   **Grid**: Defines the overall button layout dimensions using `Cols` and `Rows`.
-*   **Label**: The text shown on the button, specified by `<FontSize><LabelText>`. The `<FontSize>` (`S`, `M`, or `L`) determines the font used for rendering `<LabelText>`. Keep labels concise, especially with larger fonts.
+*   **Label**: The text shown on the button, specified by `<FontSize><LabelText>`. The `<FontSize>` (`S`, `M`, `L`, or `J`) determines the font used for rendering `<LabelText>`. Keep labels concise, especially with larger fonts.
 *   **Placement**:
-    *   **Explicit Placement (4-digit GridInfo)**: If `<GridInfo>` (`Col ColSpan Row RowSpan`) is provided, the button is placed at the specified `Col`, `Row` and occupies `ColSpan` x `RowSpan` cells. Overlapping buttons defined explicitly result in an error.
+    *   **Explicit Placement (4-digit GridInfo)**: If `<GridInfo>` (`Col Row ColSpan RowSpan`) is provided, the button is placed at the specified `Col`, `Row` and occupies `ColSpan` x `RowSpan` cells. Overlapping buttons defined explicitly result in an error. **(Order changed in v3.7)**
     *   **Automatic Placement (0 or 2-digit GridInfo)**:
         *   **Span**: If `<GridInfo>` is omitted (0 digits), the span defaults to 1x1. If `<GridInfo>` is 2 digits (`ColSpan RowSpan`), the button uses that span.
         *   **Position**: The system places the button's top-left corner in the first available cell (searching row-major: left-to-right, then top-to-bottom) where the button's entire `ColSpan` x `RowSpan` area fits without overlapping any previously placed buttons (either explicit or auto-placed).
@@ -189,10 +191,10 @@ The `<ActionString>` defines what happens when a button is interacted with. It's
 1.  **Parse**: Check syntax line by line.
     *   Check for leading `T`.
     *   Check if next characters are digits (GridInfo).
-        *   If 4 digits: Store explicit placement (`Col`, `Row`) and span (`ColSpan`, `RowSpan`). Mark as explicitly placed.
+        *   If 4 digits: Store explicit placement (`Col`, `Row`) and span (`ColSpan`, `RowSpan`). Mark as explicitly placed. **(Order: Col Row ColSpan RowSpan)**
         *   If 2 digits: Store span (`ColSpan`, `RowSpan`). Mark for auto-placement with specified span.
         *   If 0 digits (no digits follow `T` or at start): Default span to 1x1. Mark for auto-placement with 1x1 span.
-    *   Expect mandatory Font Size character (`S`, `M`, or `L`). Store it.
+    *   Expect mandatory Font Size character (`S`, `M`, `L`, or `J`). Store it.
     *   Extract LabelText following the Font Size character up to the `\t`.
     *   Expect `\t` character.
     *   Parse ActionString.
@@ -215,13 +217,13 @@ The `<ActionString>` defines what happens when a button is interacted with. It's
                 *   Set state OFF (unhighlight).
     *   **Layout Change (`G<file>`)**: Triggered after preceding actions complete.
 
-## 6. Examples (v3.6 Syntax with `FontSize` prefix)
+## 6. Examples (v3.7 Syntax with `Col Row ColSpan RowSpan`)
 
 *Assume a 5x4 grid and default delay of 50ms unless specified otherwise.*
 
-*   **Explicit Placement (4 digits)**:
-    *   `0101MA\t'a'` (Momentary, Col 0, Row 0, 1x1, Medium Font Label "A", Action 'a')
-    *   `T1211MCtrl\tLC` (Toggle, Col 1, Row 1, 2x1, Medium Font Label "Ctrl", Action LC)
+*   **Explicit Placement (4 digits: `Col Row ColSpan RowSpan`)**:
+    *   `0011MA\t'a'` (Momentary, Col 0, Row 0, 1x1, Medium Font Label "A", Action 'a')
+    *   `T1121MCtrl\tLC` (Toggle, Col 1, Row 1, 2x1, Medium Font Label "Ctrl", Action LC)
 *   **Auto Placement - Default Span (0 digits)**:
     *   `MQ\t'q'` (Momentary, 1x1, placed in first free slot, Medium Font Label "Q", Action 'q')
     *   `TMW\t'w'` (Toggle, 1x1, placed in next free slot, Medium Font Label "W", Action 'w')
@@ -237,11 +239,11 @@ The `<ActionString>` defines what happens when a button is interacted with. It's
 *   **Mixed Placement Example**:
     ```
     5x4 (20) # 5 columns, 4 rows, 20ms default delay
-    # Explicit placements first
-    0100MA\t'a'
-    1100MB\t'b'
-    4100MC\t'c'
-    0110MD\t'd'
+    # Explicit placements first (Col Row ColSpan RowSpan)
+    0011MA\t'a'      # Col 0, Row 0, 1x1
+    1011MB\t'b'      # Col 1, Row 0, 1x1
+    4011MC\t'c'      # Col 4, Row 0, 1x1
+    0111MD\t'd'      # Col 0, Row 1, 1x1
     # Auto placements fill the gaps
     ME\t'e'      # Auto 1x1 -> likely at 2,0
     MF\t'f'      # Auto 1x1 -> likely at 3,0
@@ -252,7 +254,7 @@ The `<ActionString>` defines what happens when a button is interacted with. It's
     ML\t'l'      # Auto 1x1 -> likely at 2,2
     ```
 *   **Simultaneous Press**:
-    *   `0101MCut\tLC'x'` (Explicit placement)
+    *   `0011MCut\tLC'x'` (Explicit placement)
     *   `MCopy\tLC'c'` (Auto placement 1x1)
     *   `MPaste\tLC'v'` (Auto placement 1x1)
 *   **Sequential Key Presses**:
@@ -273,6 +275,9 @@ The `<ActionString>` defines what happens when a button is interacted with. It's
 *   **Release Control & Layout Change**:
     *   `MPanic\t|X Gmain.cfg` (Auto placement 1x1)
     *   `MDone\t"Done." (500) Gmain.cfg` (Auto placement 1x1)
+*   **Jumbo Font Example**:
+    *   `J↑\t{UP}` (Auto placement 1x1, Jumbo Font Label "↑", Action Up Arrow)
+    *   `0311J✓\t{ENTER}` (Explicit placement Col 0, Row 3, 1x1, Jumbo Font Label "✓", Action Enter)
 
 
 ## Appendix A: Special Key Names (`{NAME}`) and Modifier Codes (Prefixes)
