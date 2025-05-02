@@ -2,10 +2,10 @@
 
 ## 1. Introduction
 
-This document describes the configuration file format (v3.2) used to define keyboard layouts and actions for the ESP32 Thumbpad device. This format allows for defining button appearance, grid layout, and complex HID keyboard actions including **sequential character typing (`"string"`)**, **simultaneous key presses (`'keys'`)**, default and explicit delays (`d<ms>` / `(<ms>)`), toggles, modifiers with defined persistence, explicit modifier release (`\MOD`), and explicit key release control (`|`).
+This document describes the configuration file format (v3.2) used to define keyboard layouts and actions for the ESP32 Thumbpad device. This format allows for defining button appearance, grid layout, and complex HID keyboard actions including **sequential character typing (`"string"`)**, **simultaneous key presses (`'keys'`)**, default and explicit delays using `(<ms>)` syntax, toggles, modifiers with defined persistence, explicit modifier release (`\MOD`), and explicit key release control (`|`).
 
 **Key changes in v3.2:**
-*   Reintroduced **default delay** (`d<ms>`) in grid definition, applied between sequential components unless overridden by `(<ms>)`.
+*   Reintroduced **default delay**, specified in the grid definition using `(<ms>)` syntax, applied between sequential components unless overridden by an explicit `(<ms>)`.
 *   Clarified **modifier persistence**: Modifiers apply to their component and persist for subsequent sequential components in the same press sequence unless explicitly released (`\MOD`) or overridden.
 *   Refined **typing sequence (`"string"`) modifier behavior**: Prefixed modifiers are held *during* the typing sequence and released *after* it completes (unless persistence rules dictate otherwise). This enables shortcuts like `LC"kd"` (Ctrl+K, D).
 *   Introduced **explicit modifier release (`\MOD`)**: Allows releasing specific modifiers mid-sequence (e.g., `\LC`).
@@ -16,10 +16,10 @@ This document describes the configuration file format (v3.2) used to define keyb
 Configuration files are plain text files (.cfg).
 
 *   First Line (Mandatory): Grid Definition
-    *   **Grid Definition**: `<Cols>x<Rows>[ d<DefaultDelayMS>]`
+    *   **Grid Definition**: `<Cols>x<Rows>[ (<DefaultDelayMS>)]`
         *   `<Cols>`: Number of columns in the grid (e.g., 5).
         *   `<Rows>`: Number of rows in the grid (e.g., 4).
-        *   `d<DefaultDelayMS>` (Optional): Overrides the global default delay (typically 50ms) for sequential actions within this file. Example: `5x4 d20` sets the default delay to 20ms for this layout.
+        *   `(<DefaultDelayMS>)` (Optional): Overrides the global default delay (typically 50ms) for sequential actions within this file. Example: `5x4 (20)` sets the default delay to 20ms for this layout. **Note the parenthesis syntax.**
 *   **Button Definitions**: Button Definitions or Comments
     *   Button Definition: `<GridInfo><Label>\t[T]<ActionString>`
         *   `<GridInfo>`: 4 digits specifying position and span: Col ColSpan Row RowSpan (e.g., 0111 = Col 0, Span 1; Row 1, Span 1). Spans must be at least 1.
@@ -118,7 +118,7 @@ The `<ActionString>` defines what happens when a button is interacted with. It's
 ### 4.3. Sequences and Timing
 
 *   **Sequential Actions**: Separate Action Components (`'keys'`, `{KEY}`, `"string"`, `(<ms>)`, `G<file>`, `\MOD`) with one or more spaces. They execute in order.
-    *   **Default Delay**: Applies between space-separated components unless an explicit `(<ms>)` component is used. Defined by `d<ms>` in grid definition or global default. Also applies between characters/keys within a `"string"`.
+    *   **Default Delay**: Applies between space-separated components unless an explicit `(<ms>)` component is used. Defined by `(<ms>)` in grid definition or global default. Also applies between characters/keys within a `"string"`.
     *   **Explicit Delays**: Use the `(<ms>)` component to introduce specific pauses, overriding the default delay for that step.
     *   Example: `'A' 'B' 'C'` (Press A, default delay, Press B, default delay, Press C).
     *   Example: `'A' (100) 'B' (20) 'C'` (Press A, wait 100ms, Press B, wait 20ms, Press C).
@@ -174,7 +174,7 @@ The `<ActionString>` defines what happens when a button is interacted with. It's
 
 ## 5. Execution Flow Summary
 
-1.  **Parse**: Check syntax. Determine Mode (T/Momentary). Store default delay.
+1.  **Parse**: Check syntax. Determine Mode (T/Momentary). Store default delay from grid definition.
 2.  **Touch Press**:
     *   Handle `|` prefix (`|Modifiers`, `|X`) if present.
     *   If Momentary: Execute `<Press Sequence>` (respecting default/explicit delays and modifier persistence).
@@ -194,7 +194,7 @@ The `<ActionString>` defines what happens when a button is interacted with. It's
 
 ## 6. Examples
 
-*Assume default delay `d50` unless grid definition overrides.*
+*Assume a default delay of 50ms unless the grid definition specifies otherwise (e.g., `5x4 (20)`).*
 
 *   **Simple Key Press**:
     *   `'q'` (Momentary): Press 'q', release 'q' on lift.
