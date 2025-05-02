@@ -1,18 +1,14 @@
-# Thumbpad Keyboard Configuration Language v3.11
+# Thumbpad Keyboard Configuration Language v3.12
 
 ## 1. Introduction
 
-This document describes the configuration file format (v3.11) used to define keyboard layouts and actions for the ESP32 Thumbpad device. This format allows for defining button appearance (including **font size** and **icon codes**), grid layout (explicitly or automatically with optional sizing), and complex HID keyboard actions including **sequential character typing (`"string"`)**, **simultaneous key presses (`'keys'`)**, default and explicit delays using `(<ms>)` syntax, toggles, modifiers with defined persistence, explicit modifier release (`\MOD`), and explicit key release control (`|`).
+This document describes the configuration file format (v3.12) used to define keyboard layouts and actions for the ESP32 Thumbpad device. This format allows for defining button appearance (including font size and **icon codes**), grid layout (explicitly or automatically with optional sizing), and complex HID keyboard actions including **sequential character typing (`"string"`)**, **simultaneous key presses (`'keys'`)**, default and explicit delays using `(<ms>)` syntax, toggles, modifiers with defined persistence, explicit modifier release (`\MOD`), and explicit key release control (`|`).
 
-**Key changes in v3.11:**
-*   Changed escape sequence for a literal dollar sign in label text to **`$$`** (instead of `\$`).
-*   Removed the need for `\\` escape sequence within label text. (Backslash `\` is only special in the Action String for `\MOD`).
-*   Clarified parsing rule for **Icon Codes (`$<Name>`)**: Uses **longest match** based on Appendix B.
-*   Added **Jumbo (`J`) font size**.
-*   The **4-digit GridInfo** order is **`Col Row ColSpan RowSpan`**.
-*   The **Label** text is preceded by a **mandatory font size specifier (`S`, `M`, `L`, or `J`)**.
-*   The **GridInfo** specifier remains optional (0, 2, or 4 digits).
-*   The **Toggle** specifier (`T`) remains at the beginning of the line.
+**Key changes in v3.12:**
+*   **Corrected Appendix B (Icon Codes)** to accurately reflect symbols defined by `LV_STR_SYMBOL_...` constants.
+*   Escape sequence for a literal dollar sign in label text remains `$$`.
+*   Parsing rule for Icon Codes (`$<Name>`) remains longest match.
+*   Other features (GridInfo, FontSize, Toggle, ActionString syntax, etc.) remain as defined previously.
 
 ## 2. File Format Overview
 
@@ -22,12 +18,12 @@ Configuration files are plain text files (.cfg), typically UTF-8 encoded.
     *   **Syntax**: `<Cols>x<Rows>[ (<DefaultDelayMS>)]`
     *   **`<Cols>`**: An integer specifying the number of columns in the button grid (e.g., `5`).
     *   **`<Rows>`**: An integer specifying the number of rows in the button grid (e.g., `4`).
-    *   **`(<DefaultDelayMS>)`**: (Optional) Overrides the global default delay (typically 50ms) used between sequential actions within this specific layout file. The value is specified in milliseconds within parentheses. If omitted, the global default is used.
+    *   **`(<DefaultDelayMS>)`**: (Optional, default 50) Overrides the global default delay (typically 50ms) used between sequential actions within this specific layout file. The value is specified in milliseconds within parentheses. If omitted, the global default is used.
         *   Example: `5x4` (5 columns, 4 rows, default delay)
         *   Example: `10x2 (20)` (10 columns, 2 rows, 20ms default delay for this file)
 
 *   **Button Definitions**: Subsequent lines define buttons or are comments/empty.
-    *   **Syntax**: `[T][<GridInfo>]<FontSize><LabelText>\t<ActionString>`
+    *   **Syntax**: `[T][<GridInfo>]<FontSize><LabelText>⭾<ActionString>`
     *   **`T`**: (Optional) If present as the *very first character* on the line, this button operates in **Toggle** mode. If absent, the button operates in **Momentary** mode (see Section 4.2).
     *   **`<GridInfo>`**: (Optional) Specifies the button's placement and/or size. Must appear immediately after `T` if `T` is present. Can be:
         *   **Omitted (0 digits)**: The button defaults to a **1x1 span** and its position is determined automatically by the layout engine (see Section 3).
@@ -42,8 +38,8 @@ Configuration files are plain text files (.cfg), typically UTF-8 encoded.
         *   Standard printable ASCII characters.
         *   **Icon Codes (`$<Name>`)**: Special codes starting with `$` that are replaced by glyphs from a built-in icon font (see Appendix B). Parsing uses a **longest match** rule against Appendix B.
         *   **Literal Dollar Sign (`$$`)**: The sequence `$$` is rendered as a single literal `$` character.
-        *   Example: `SOK`, `MCtrl`, `L$LEFT Arrow`, `J$OK`, `M$SAVEFile`, `SPrice: $$5`.
-    *   **`\t`**: A literal tab character. This is crucial as it separates the button's visual definition (Toggle, GridInfo, FontSize, LabelText) from its functional definition (`<ActionString>`).
+        *   Example: `SOK`, `MCtrl`, `L$LEFT`, `J$OK`, `M$SAVE File`, `SPrice: $$5`.
+    *   **`⭾`**: A literal tab character, represented throughout this document with this icon so it is not confused with a space. This is crucial as it separates the button's visual definition (Toggle, GridInfo, FontSize, LabelText) from its functional definition (`<ActionString>`).
     *   **`<ActionString>`**: Defines the HID keyboard actions performed by the button (see Section 4).
 
 *   **Comment**: Lines starting with a hash symbol (`#`) are ignored by the parser.
@@ -226,8 +222,8 @@ Special actions executed immediately on touch *press*, primarily for resetting s
         *   Check for leading `T` (Toggle mode).
         *   Check for GridInfo (0, 2, or 4 digits). Store placement/span info and placement type (explicit/auto). Remember `Col Row ColSpan RowSpan` order for 4 digits.
         *   Expect and store mandatory Font Size character (`S`, `M`, `L`, or `J`).
-        *   Extract LabelText up to `\t`. Parse for ASCII, `$Name` icon codes (longest match), and `$$` escapes, storing the sequence of literal segments and icon codes.
-        *   Expect `\t`.
+        *   Extract LabelText up to `⭾`. Parse for ASCII, `$Name` icon codes (longest match against Appendix B), and `$$` escapes, storing the sequence of literal segments and icon codes.
+        *   Expect `⭾`.
         *   Parse the `<ActionString>` into its sequence of Press Components and (if present) Release Components, noting explicit delays and the `|` separator.
 2.  **Layout Calculation**: After parsing all button definitions:
     *   Place explicitly defined buttons on the grid. Check for overlaps.
@@ -235,7 +231,7 @@ Special actions executed immediately on touch *press*, primarily for resetting s
     *   Report errors if any overlaps occur or if an auto-placed button cannot fit.
 3.  **Rendering**: When drawing the UI:
     *   For each button, use its calculated position and span.
-    *   Render the stored label sequence (literal text segments and icon codes) using the stored `FontSize`. Replace icon codes with glyphs, render `$$` as `$`. Handle text wrapping within the button bounds.
+    *   Render the stored label sequence (literal text segments and icon codes) using the stored `FontSize`. Replace icon codes with glyphs from Appendix B, render `$$` as `$`. Handle text wrapping within the button bounds.
 4.  **Runtime Execution**: When a button touch event occurs:
     *   **Touch Press**:
         *   Check for `|` prefix (`|Modifiers` or `|X`) and execute immediately if present.
@@ -253,66 +249,81 @@ Special actions executed immediately on touch *press*, primarily for resetting s
                 *   Change state to OFF, unhighlight button.
     *   **Layout Change (`G<file>`)**: If encountered during sequence execution, load the new layout file after the current component finishes.
 
-## 6. Examples (v3.11 Syntax)
+## 6. Examples (v3.12 Syntax)
 
 *Assume a 5x4 grid and default delay of 50ms unless specified otherwise.*
 
 *   **Explicit Placement (4 digits: `Col Row ColSpan RowSpan`)**:
-    *   `0011MA\t'a'` (Momentary, Col 0, Row 0, 1x1, Medium Font Label "A", Action 'a')
-    *   `T1121MCtrl\tLC` (Toggle, Col 1, Row 1, 2x1, Medium Font Label "Ctrl", Action LC)
+    *   `0011MA⭾'a'`
+    *   `T1121MCtrl⭾LC`
 *   **Auto Placement - Default Span (0 digits)**:
-    *   `MQ\t'q'` (Momentary, 1x1, placed in first free slot, Medium Font Label "Q", Action 'q')
-    *   `TMW\t'w'` (Toggle, 1x1, placed in next free slot, Medium Font Label "W", Action 'w')
-    *   `ME\t'e'`
+    *   `MQ⭾'q'`
+    *   `TMW⭾'w'`
+    *   `ME⭾'e'`
 *   **Auto Placement - Specified Span (2 digits: `ColSpan RowSpan`)**:
-    *   `21LEnter\t{ENTER}` (Auto-placed 2x1 button, Large Font Label "Enter")
-    *   `12MShift\tLS` (Auto-placed 1x2 button, Medium Font Label "Shift")
-    *   `T22SBig Toggle\t"Toggle Me"` (Toggle, Auto-placed 2x2 button, Small Font Label "Big Toggle")
-*   **Using Icon Codes & Escapes**:
-    *   `J$UP\t{UP}` (Jumbo Up Arrow Icon)
-    *   `M$OK OK\t{ENTER}` (Medium OK icon followed by literal " OK")
-    *   `S$SAVEFile\tLC's'` (Small Save icon followed by literal "File")
-    *   `MPrice: $$5.00\t"5.00"` (Medium font, literal "Price: $5.00")
-    *   `S$$$$ Top Price $$$$\t"'1'"` (Small font, literal "$$ Top Price $$")
-*   **Mixed Placement Example**:
+    *   `21LEnter⭾{ENTER}`
+    *   `12MShift⭾LS`
+    *   `T22SBig Toggle⭾"Toggle Me"`
+*   **Using Icon Codes & Escapes (Referencing updated Appendix B)**:
+    *   `J$UP⭾{UP}` (Jumbo Up Arrow Icon)
+    *   `M$OK OK⭾{ENTER}` (Medium Check icon followed by literal " OK")
+    *   `S$SAVE File⭾LC's'` (Small Save icon followed by literal " File")
+    *   `MPrice: $$5.00⭾"5.00"` (Medium font, literal "Price: $5.00")
+    *   `S$$$$ Top Price $$$$⭾"'1'"` (Small font, literal "\$$ Top Price \$$")
+    *   `J$AUDIO⭾{VOLUP}` (Jumbo Audio/Sound icon)
+    *   `M$WIFI Status⭾Gwifi.cfg` (Medium Wifi icon + " Status")
+*   **Mixed Placement Example**: Here we use an actual tab instead of ⭾ to show you what the file will look like.
     ```
     5x4 (20)
     # Explicit placements first (Col Row ColSpan RowSpan)
-    0011MA\t'a'
-    1011MB\t'b'
-    4011MC\t'c'
-    0111MD\t'd'
+    0011MA  'a'
+    1011MB  'b'
+    4011MC  'c'
+    0111MD  'd'
     # Auto placements fill the gaps
-    ME\t'e'      # Auto 1x1 -> likely at 2,0
-    MF\t'f'      # Auto 1x1 -> likely at 3,0
-    21S$COPY Copy\tLC'c' # Auto 2x1 -> likely at 1,1, Small Font, Copy icon + " Copy"
-    MJ\t'j'      # Auto 1x1 -> likely at 3,1
-    MK\t'k'      # Auto 1x1 -> likely at 4,1
-    22L$HOME\t{HOME} # Auto 2x2 -> likely at 0,2, Large Font Home Icon
-    ML\t'l'      # Auto 1x1 -> likely at 2,2
+    ME  'e'      # Auto 1x1 placed at 2,0
+    MF  'f'      # Auto 1x1 placed at 3,0
+    21S$COPY Copy⭾LC'c' # Auto 2x1 placed at 1,1, Small Font, Copy icon + " Copy"
+    MJ  'j'      # Auto 1x1 placed at 3,1
+    MK  'k'      # Auto 1x1 placed at 4,1
+    22J$HOME    {HOME} # Auto 2x2 placed at 0,2, Large Font Home Icon
+    ML  'l'      # Auto 1x1 placed at 2,2
+    ```
+    This layout will look like this:
+    ```
+    (Col 0) (1)   (2)   (3)   (4)
+    +-----+-----+-----+-----+-----+
+    |  A  |  B  |  E  |  F  |  C  |  (Row 0)
+    +-----+-----+-----+-----+-----+
+    |  D  |  🗊 Copy  |  J  |  K  |  (Row 1)
+    +-----+-----------+-----+-----+
+    |    ,^、   |  L  |     |     |  (Row 2)
+    |   /---\   +-----+-----+-----+
+    |   |_‖_|   |     |     |     |  (Row 3)
+    +-----------+-----+-----+-----+
     ```
 *   **Simultaneous Press**:
-    *   `0011MCut\tLC'x'` (Explicit placement)
-    *   `MCopy\tLC'c'` (Auto placement 1x1)
-    *   `MPaste\tLC'v'` (Auto placement 1x1)
+    *   `0011MCut⭾LC'x'` (Explicit placement)
+    *   `MCopy⭾LC'c'` (Auto placement 1x1)
+    *   `MPaste⭾LC'v'` (Auto placement 1x1)
 *   **Sequential Key Presses**:
-    *   `MSeq\t'q' (10) 'w' (100) 'e'` (Auto placement 1x1)
-    *   `MSeqDef\t'q' 'w' 'e'` (Auto placement 1x1, uses default delay)
+    *   `MSeq⭾'q' (10) 'w' (100) 'e'` (Auto placement 1x1)
+    *   `MSeqDef⭾'q' 'w' 'e'` (Auto placement 1x1, uses default delay)
 *   **Typing Strings**:
-    *   `MGreet\t"Hello World!"` (Auto placement 1x1)
-    *   `TSCode Snippet\t"if (x > 0) {NL}{TAB}// TODO{NL}"` (Toggle, Auto placement 1x1, Small Font)
+    *   `MGreet⭾"Hello World!"` (Auto placement 1x1)
+    *   `TSCode Snippet⭾"if (x > 0) {NL}{TAB}// TODO{NL}"` (Toggle, Auto placement 1x1, Small Font)
 *   **Modifiers & Persistence**:
-    *   `MShift1\tLS'1'` (Auto placement 1x1, sends '!')
-    *   `MCapsHello\tLS"hello"` (Auto placement 1x1, sends 'HELLO')
-    *   `MCtrlK D\tLC"kd"` (Auto placement 1x1, sends Ctrl+K, D sequence)
-    *   `MCtrlA B\tLC'a' 'b'` (Auto placement 1x1, sends Ctrl+A, then Ctrl+B)
-    *   `MCtrlA then B\tLC'a' \LC 'b'` (Auto placement 1x1, sends Ctrl+A, then just B)
+    *   `MShift1⭾LS'1'` (Auto placement 1x1, sends '!')
+    *   `MCapsHello⭾LS"hello"` (Auto placement 1x1, sends 'HELLO')
+    *   `MCtrlK D⭾LC"kd"` (Auto placement 1x1, sends Ctrl+K, D sequence)
+    *   `MCtrlA B⭾LC'a' 'b'` (Auto placement 1x1, sends Ctrl+A, then Ctrl+B)
+    *   `MCtrlA then B⭾LC'a' \LC 'b'` (Auto placement 1x1, sends Ctrl+A, then just B)
 *   **Explicit Release**:
-    *   `MHoldA\t'A' (500) | 'A'` (Auto placement 1x1)
-    *   `TMHoldA\tT'A' (500) |(20) 'A'` (Toggle, Auto placement 1x1)
+    *   `MHoldA⭾'A' (500) | 'A'` (Auto placement 1x1)
+    *   `TMHoldA⭾T'A' (500) |(20) 'A'` (Toggle, Auto placement 1x1)
 *   **Release Control & Layout Change**:
-    *   `MPanic\t|X Gmain.cfg` (Auto placement 1x1)
-    *   `MDone\t"Done." (500) Gmain.cfg` (Auto placement 1x1)
+    *   `MPanic⭾|X Gmain.cfg` (Auto placement 1x1)
+    *   `MDone⭾"Done." (500) Gmain.cfg` (Auto placement 1x1)
 
 
 ## Appendix A: Special Key Names (`{NAME}`) and Modifier Codes (Prefixes)
@@ -404,65 +415,72 @@ Special actions executed immediately on touch *press*, primarily for resetting s
 
 ## Appendix B: Icon Codes (`$<Name>`)
 
-Icon codes provide access to a subset of FontAwesome icons built into the default LVGL fonts. Use these codes within the `<LabelText>` part of a button definition. The rendering engine will replace the code (e.g., `$OK`) with the corresponding icon glyph.
+Icon codes provide access to a subset of FontAwesome icons built into the default LVGL fonts, corresponding to the `LV_STR_SYMBOL_...` definitions. Use these codes within the `<LabelText>` part of a button definition. The rendering engine will replace the code (e.g., `$OK`) with the corresponding icon glyph.
 
 **Parsing Rule:** When parsing `<LabelText>`, the system uses a **longest match** rule. It looks for the longest possible sequence starting with `$` that matches an Icon Code name defined below. Any characters immediately following the matched code are treated as literal text.
 
 **Escape Sequence:**
 *   Use `$$` to represent a literal `$` character.
 
-| Icon Code (`$<Name>`) | LVGL Symbol Name | Description         |
-| :-------------------- | :--------------- | :------------------ |
-| `$OK`                 | `LV_SYMBOL_OK`   | Check mark          |
-| `$CANCEL`             | `LV_SYMBOL_CLOSE`| Cancel / Close (X)  |
-| `$POWER`              | `LV_SYMBOL_POWER`| Power symbol        |
-| `$SETTINGS`           | `LV_SYMBOL_SETTINGS`| Settings / Gear   |
-| `$HOME`               | `LV_SYMBOL_HOME` | Home icon           |
-| `$DOWNLOAD`           | `LV_SYMBOL_DOWNLOAD`| Download arrow    |
-| `$UPLOAD`             | `LV_SYMBOL_UPLOAD`| Upload arrow        |
-| `$TRASH`              | `LV_SYMBOL_TRASH`| Trash can           |
-| `$COPY`               | `LV_SYMBOL_COPY` | Copy icon           |
-| `$PASTE`              | `LV_SYMBOL_PASTE`| Paste icon          |
-| `$SAVE`               | `LV_SYMBOL_SAVE` | Save icon (Floppy)  |
-| `$EDIT`               | `LV_SYMBOL_EDIT` | Edit / Pencil       |
-| `$BACKSPACE`          | `LV_SYMBOL_BACKSPACE`| Backspace arrow |
-| `$LEFT`               | `LV_SYMBOL_LEFT` | Left arrow          |
-| `$RIGHT`              | `LV_SYMBOL_RIGHT`| Right arrow         |
-| `$UP`                 | `LV_SYMBOL_UP`   | Up arrow            |
-| `$DOWN`               | `LV_SYMBOL_DOWN` | Down arrow          |
-| `$EYE_OPEN`           | `LV_SYMBOL_EYE_OPEN`| Eye open          |
-| `$EYE_CLOSE`          | `LV_SYMBOL_EYE_CLOSE`| Eye closed        |
-| `$WARNING`            | `LV_SYMBOL_WARNING`| Warning / Exclamation |
-| `$SHUFFLE`            | `LV_SYMBOL_SHUFFLE`| Shuffle arrows    |
-| `$PLAY`               | `LV_SYMBOL_PLAY` | Play button         |
-| `$PAUSE`              | `LV_SYMBOL_PAUSE`| Pause button        |
-| `$STOP`               | `LV_SYMBOL_STOP` | Stop button         |
-| `$PREV`               | `LV_SYMBOL_PREV` | Previous track      |
-| `$NEXT`               | `LV_SYMBOL_NEXT` | Next track          |
-| `$PLUS`               | `LV_SYMBOL_PLUS` | Plus sign           |
-| `$MINUS`              | `LV_SYMBOL_MINUS`| Minus sign          |
-| `$VOLUME_MAX`         | `LV_SYMBOL_VOLUME_MAX`| Volume high     |
-| `$VOLUME_MID`         | `LV_SYMBOL_VOLUME_MID`| Volume medium   |
-| `$MUTE`               | `LV_SYMBOL_MUTE` | Volume muted        |
-| `$BELL`               | `LV_SYMBOL_BELL` | Bell icon           |
-| `$KEYBOARD`           | `LV_SYMBOL_KEYBOARD`| Keyboard icon     |
-| `$GPS`                | `LV_SYMBOL_GPS`  | GPS / Location      |
-| `$FILE`               | `LV_SYMBOL_FILE` | File icon           |
-| `$WIFI`               | `LV_SYMBOL_WIFI` | WiFi symbol         |
-| `$BLUETOOTH`          | `LV_SYMBOL_BLUETOOTH`| Bluetooth symbol|
-| `$LIST`               | `LV_SYMBOL_LIST` | List / Menu         |
-| `$REFRESH`            | `LV_SYMBOL_REFRESH`| Refresh / Reload  |
-| `$SD_CARD`            | `LV_SYMBOL_SD_CARD`| SD Card icon      |
-| `$USB`                | `LV_SYMBOL_USB`  | USB symbol          |
-| `$DRIVE`              | `LV_SYMBOL_DRIVE`| Drive / HDD         |
-| `$LOOP`               | `LV_SYMBOL_LOOP` | Loop arrows         |
-| `$CHARGE`             | `LV_SYMBOL_CHARGE`| Battery charging  |
-| `$BATTERY_FULL`       | `LV_SYMBOL_BATTERY_FULL`| Battery full  |
-| `$BATTERY_3`          | `LV_SYMBOL_BATTERY_3`| Battery 3/4     |
-| `$BATTERY_2`          | `LV_SYMBOL_BATTERY_2`| Battery 1/2     |
-| `$BATTERY_1`          | `LV_SYMBOL_BATTERY_1`| Battery 1/4     |
-| `$BATTERY_EMPTY`      | `LV_SYMBOL_BATTERY_EMPTY`| Battery empty |
-| `$IMAGE`              | `LV_SYMBOL_IMAGE`| Image / Picture   |
-| `$BULLET`             | `LV_SYMBOL_BULLET`| Bullet point      |
+*(Note: The exact appearance depends on the font configured in the firmware.)*
 
-*(Note: This list is based on common LVGL built-in symbols. The exact availability might depend on the specific LVGL version and configuration used in the firmware. Ensure icon names used here do not create unavoidable ambiguity with the longest match rule.)*
+| Icon Code (`$<Name>`) | Corresponding LVGL STR   | Description             |
+| :-------------------- | :----------------------- | :---------------------- |
+| `$BULLET`             | `LV_SYMBOL_BULLET`       | Bullet point (•)        |
+| `$AUDIO`              | `LV_SYMBOL_AUDIO`        | Audio / Sound           |
+| `$VIDEO`              | `LV_SYMBOL_VIDEO`        | Video / Camera          |
+| `$LIST`               | `LV_SYMBOL_LIST`         | List / Menu             |
+| `$OK`                 | `LV_SYMBOL_OK`           | Check mark              |
+| `$CLOSE`              | `LV_SYMBOL_CLOSE`        | Close / Cancel (X)      |
+| `$POWER`              | `LV_SYMBOL_POWER`        | Power symbol            |
+| `$SETTINGS`           | `LV_SYMBOL_SETTINGS`     | Settings / Gear         |
+| `$TRASH`              | `LV_SYMBOL_TRASH`        | Trash can               |
+| `$HOME`               | `LV_SYMBOL_HOME`         | Home icon               |
+| `$DOWNLOAD`           | `LV_SYMBOL_DOWNLOAD`     | Download arrow          |
+| `$DRIVE`              | `LV_SYMBOL_DRIVE`        | Drive / HDD             |
+| `$REFRESH`            | `LV_SYMBOL_REFRESH`      | Refresh / Reload        |
+| `$MUTE`               | `LV_SYMBOL_MUTE`         | Volume muted            |
+| `$VOLUME_MID`         | `LV_SYMBOL_VOLUME_MID`   | Volume medium           |
+| `$VOLUME_MAX`         | `LV_SYMBOL_VOLUME_MAX`   | Volume high             |
+| `$IMAGE`              | `LV_SYMBOL_IMAGE`        | Image / Picture         |
+| `$EDIT`               | `LV_SYMBOL_EDIT`         | Edit / Pencil           |
+| `$PREV`               | `LV_SYMBOL_PREV`         | Previous track          |
+| `$PLAY`               | `LV_SYMBOL_PLAY`         | Play button             |
+| `$PAUSE`              | `LV_SYMBOL_PAUSE`        | Pause button            |
+| `$STOP`               | `LV_SYMBOL_STOP`         | Stop button             |
+| `$NEXT`               | `LV_SYMBOL_NEXT`         | Next track              |
+| `$EJECT`              | `LV_SYMBOL_EJECT`        | Eject                   |
+| `$LEFT`               | `LV_SYMBOL_LEFT`         | Left arrow              |
+| `$RIGHT`              | `LV_SYMBOL_RIGHT`        | Right arrow             |
+| `$PLUS`               | `LV_SYMBOL_PLUS`         | Plus sign               |
+| `$MINUS`              | `LV_SYMBOL_MINUS`        | Minus sign              |
+| `$EYE_OPEN`           | `LV_SYMBOL_EYE_OPEN`     | Eye open                |
+| `$EYE_CLOSE`          | `LV_SYMBOL_EYE_CLOSE`    | Eye closed              |
+| `$WARNING`            | `LV_SYMBOL_WARNING`      | Warning / Exclamation   |
+| `$SHUFFLE`            | `LV_SYMBOL_SHUFFLE`      | Shuffle arrows          |
+| `$UP`                 | `LV_SYMBOL_UP`           | Up arrow                |
+| `$DOWN`               | `LV_SYMBOL_DOWN`         | Down arrow              |
+| `$LOOP`               | `LV_SYMBOL_LOOP`         | Loop arrows             |
+| `$DIRECTORY`          | `LV_SYMBOL_DIRECTORY`    | Folder / Directory      |
+| `$UPLOAD`             | `LV_SYMBOL_UPLOAD`       | Upload arrow            |
+| `$CALL`               | `LV_SYMBOL_CALL`         | Call / Phone            |
+| `$CUT`                | `LV_SYMBOL_CUT`          | Cut / Scissors          |
+| `$COPY`               | `LV_SYMBOL_COPY`         | Copy icon               |
+| `$SAVE`               | `LV_SYMBOL_SAVE`         | Save icon (Floppy)      |
+| `$CHARGE`             | `LV_SYMBOL_CHARGE`       | Battery charging / Bolt |
+| `$PASTE`              | `LV_SYMBOL_PASTE`        | Paste icon              |
+| `$BELL`               | `LV_SYMBOL_BELL`         | Bell icon               |
+| `$KEYBOARD`           | `LV_SYMBOL_KEYBOARD`     | Keyboard icon           |
+| `$GPS`                | `LV_SYMBOL_GPS`          | GPS / Location          |
+| `$FILE`               | `LV_SYMBOL_FILE`         | File icon               |
+| `$WIFI`               | `LV_SYMBOL_WIFI`         | WiFi symbol             |
+| `$BATTERY_FULL`       | `LV_SYMBOL_BATTERY_FULL` | Battery full            |
+| `$BATTERY_3`          | `LV_SYMBOL_BATTERY_3`    | Battery 3/4             |
+| `$BATTERY_2`          | `LV_SYMBOL_BATTERY_2`    | Battery 1/2             |
+| `$BATTERY_1`          | `LV_SYMBOL_BATTERY_1`    | Battery 1/4             |
+| `$BATTERY_EMPTY`      | `LV_SYMBOL_BATTERY_EMPTY`| Battery empty           |
+| `$USB`                | `LV_SYMBOL_USB`          | USB symbol              |
+| `$BLUETOOTH`          | `LV_SYMBOL_BLUETOOTH`    | Bluetooth symbol        |
+| `$BACKSPACE`          | `LV_SYMBOL_BACKSPACE`    | Backspace arrow         |
+| `$SD_CARD`            | `LV_SYMBOL_SD_CARD`      | SD Card icon            |
+| `$NEW_LINE`           | `LV_SYMBOL_NEW_LINE`     | New line / Return arrow |
