@@ -57,6 +57,7 @@ Configuration files are plain text files (.cfg), typically UTF-8 encoded.
         *   **Span**: Determined by the 2-digit `ColSpan RowSpan` if provided, otherwise defaults to 1x1 if GridInfo is omitted.
         *   **Position**: The layout engine searches the grid cells in row-major order (left-to-right across columns, then top-to-bottom across rows). It places the button's top-left corner in the first empty cell (`r`, `c`) where the button's entire `ColSpan` x `RowSpan` area fits within the grid boundaries and does not overlap any previously placed button (whether placed explicitly or automatically earlier in the file).
         *   **Error**: If the engine cannot find a suitable empty space for an auto-placed button of the required size, a configuration error occurs.
+        *   **Overlap with Automatic placement**: If an explicitly placed button attempts to occupy a cell already claimed by a previously defined auto-placed button, this also results in a configuration error.  So, it is strongly suggested to place the explicitly placed buttons at the top of the file, followed by automatically placed buttons to fill in the gaps.
 
 ## 4. Action String Syntax
 
@@ -225,12 +226,11 @@ Special actions executed immediately on touch *press*, primarily for resetting s
         *   Extract LabelText up to `⭾`. Parse for ASCII, `$Name` icon codes (longest match against Appendix B), and `$$` escapes, storing the sequence of literal segments and icon codes.
         *   Expect `⭾`.
         *   Parse the `<ActionString>` into its sequence of Press Components and (if present) Release Components, noting explicit delays and the `|` separator.
-2.  **Layout Calculation**: After parsing all button definitions:
-    *   Place explicitly defined buttons on the grid. Check for overlaps.
-    *   Iterate through the grid cells (row-major). For each auto-placed button (in the order they appeared in the file), find the first available top-left cell (`r`, `c`) where its required span fits without overlapping existing buttons or exceeding grid boundaries. Assign the position.
-    *   Report errors if any overlaps occur or if an auto-placed button cannot fit.
-3.  **Rendering**: When drawing the UI:
+2.  **Layout and Rendering (Single Pass)**: As each button definition line is parsed:
+    *   Determine the button's position and span based on its GridInfo (explicit or auto).
+    *   For auto-placed buttons, find the next available slot in the grid (respecting the ordering constraint that explicit buttons are already placed). Check for overlaps or out-of-bounds errors.
     *   For each button, use its calculated position and span.
+    *   Create the LVGL button and label objects.
     *   Render the stored label sequence (literal text segments and icon codes) using the stored `FontSize`. Replace icon codes with glyphs from Appendix B, render `$$` as `$`. Handle text wrapping within the button bounds.
 4.  **Runtime Execution**: When a button touch event occurs:
     *   **Touch Press**:
