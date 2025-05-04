@@ -4,12 +4,15 @@
 
 This document describes the configuration file format (v3.12) used to define keyboard layouts and actions for the ESP32 Thumbpad device. This format allows for defining button appearance (including font size and **icon codes**), grid layout (explicitly or automatically with optional sizing), and complex HID keyboard actions including **sequential character typing (`"string"`)**, **simultaneous key presses (`'keys'`)**, default and explicit delays using `(<ms>)` syntax, toggles, modifiers with defined persistence, explicit modifier release (`\MOD`), and explicit key release control (`|`).
 
-Note: Errors in the file are logged and the system immediately reloads the previous file.  Users may be using the thumbpad to author a new file, so every attempt should be made to keep them in a working state.  Suggested implementation: rename a working .cfg file to .bkp before replacing it, and rename it back to .cfg if parsing fails.
+Note: Errors in the file are logged and the system immediately reloads the previous file. Users may be using the thumbpad to author a new file, so every attempt should be made to keep them in a working state. Suggested implementation: rename a working .cfg file to .bkp before replacing it, and rename it back to .cfg if parsing fails.
 
 **Key changes in v3.12:**
 *   **Corrected Appendix B (Icon Codes)** to accurately reflect symbols defined by `LV_STR_SYMBOL_...` constants.
 *   Escape sequence for a literal dollar sign in label text remains `$$`.
 *   Parsing rule for Icon Codes (`$<Name>`) remains longest match.
+*   **Clarification**: Parsing of `{MODIFIER_NAME}` (e.g., `{LCTRL}`) results in `ACTION_COMP_TYPE_MOD_PRESS`.
+*   **New**: Modifier codes (`LC`, `LS`, etc.) can now be used as standalone action components, not just prefixes.
+*   **Clarification**: Execution logic sends HID reports immediately for modifier-only changes (`MOD_PRESS`, `MOD_RELEASE`), whether from standalone codes, `{MODIFIER_NAME}`, or explicit release (`\MOD`).
 *   Other features (GridInfo, FontSize, Toggle, ActionString syntax, etc.) remain as defined previously.
 
 ## 2. File Format Overview
@@ -62,7 +65,7 @@ Configuration files are plain text files (.cfg), typically UTF-8 encoded.
         *   **Span**: Determined by the 2-digit `ColSpan RowSpan` if provided, otherwise defaults to 1x1 if GridInfo is omitted.
         *   **Position**: The layout engine searches the grid cells in row-major order (left-to-right across columns, then top-to-bottom across rows). It places the button's top-left corner in the first empty cell (`r`, `c`) where the button's entire `ColSpan` x `RowSpan` area fits within the grid boundaries and does not overlap any previously placed button (whether placed explicitly or automatically earlier in the file).
         *   **Error**: If the engine cannot find a suitable empty space for an auto-placed button of the required size, a configuration error occurs.
-        *   **Overlap with Automatic placement**: If an explicitly placed button attempts to occupy a cell already claimed by a previously defined auto-placed button, this also results in a configuration error.  So, it is strongly suggested to place the explicitly placed buttons at the top of the file, followed by automatically placed buttons to fill in the gaps.
+        *   **Overlap with Automatic placement**: If an explicitly placed button attempts to occupy a cell already claimed by a previously defined auto-placed button, this also results in a configuration error. So, it is strongly suggested to place the explicitly placed buttons at the top of the file, followed by automatically placed buttons to fill in the gaps.
 
 ## 4. Action String Syntax
 
@@ -71,7 +74,6 @@ The `<ActionString>` defines the sequence of HID events generated when the butto
 *   **Structure (Momentary/Toggle)**: `<Press Sequence>[|[<ms>] <Release Sequence>]`
     *   **`<Press Sequence>`**: The sequence of actions executed on the initial press (Momentary) or the first click (Toggle).
     *   **`|`**: (Optional) A pipe character separating the Press Sequence from the Release Sequence. If present, it enables explicit control over key/modifier releases.
-    *   **`|`**: (Optional) A pipe character separating the Press Sequence from the Release Sequence. Enables explicit control over key/modifier releases.
     *   **`[(<ms>)]`**: (Optional, only if `|` is present) An explicit delay in milliseconds, enclosed in parentheses, executed *after* the release trigger (touch release or second toggle click) but *before* the `<Release Sequence>` begins. If omitted, the default delay applies here.
     *   **`<Release Sequence>`**: (Optional, only if `|` is present) The sequence of actions executed on touch release (Momentary) or the second click (Toggle). Typically used to release specific keys or modifiers held during the Press Sequence.
 
@@ -79,7 +81,7 @@ The `<ActionString>` defines the sequence of HID events generated when the butto
     *   `'keys'` (Simultaneous Key Press Literal)
     *   `{KEY}` (Special Key Name)
     *   `"string"` (Typing Sequence)
-    *   `LC`, `LS`, etc. (Modifier Code Prefix)
+    *   `LC`, `LS`, etc. (Modifier Code Prefix OR Standalone Action)
     *   `\LC`, `\LS`, etc. (Explicit Modifier Release)
     *   `(<ms>)` (Explicit Delay)
     *   `G<file>` (Layout Change)
@@ -89,21 +91,23 @@ The `<ActionString>` defines the sequence of HID events generated when the butto
 ### 4.1. Action Components Defined
 
 *   **Simultaneous Key Press Literal (`'`)**:
-    *   **Syntax**: `'keys'` - One or more printable ASCII characters enclosed in single quotes.
+    *   **Syntax**: `'keys'`
     *   **Action**: Presses the base HID keycodes corresponding to *all* characters inside the quotes *simultaneously*. These keys remain pressed until explicitly released (e.g., by the end of a Momentary action, a Toggle release, or an explicit Release Sequence).
-    *   **Details**: Case is ignored for keycode mapping (`'a'` and `'A'` both press the 'A' key). Limited to 6 simultaneous non-modifier keys by the HID standard.  This is a global limit across all currently active toggles and the pressed key.  Simultaneous keys beyond the 6th are ignored, and may or may not become pressed once other keys are released.
+    *   **Details**: Case is ignored for keycode mapping (`'a'` and `'A'` both press the 'A' key). Limited to 6 simultaneous non-modifier keys by the HID standard. This is a global limit across all currently active toggles and the pressed key. Simultaneous keys beyond the 6th are ignored, and may or may not become pressed once other keys are released.
     *   **Purpose**: Defining shortcuts (like `'cv'`), holding specific keys.
     *   **Examples**: `'a'`, `' '`, `''` (single quote key), `'abc'`.
 
 *   **Special Key Name (`{}`)**:
-    *   **Syntax**: `{KEY_NAME}` - A recognized special key name enclosed in curly braces (see Appendix A).
-    *   **Action**: Presses the HID keycode corresponding to the special key (e.g., Enter, F1, Delete, Arrow Keys). The key remains pressed until explicitly released.
+    *   **Syntax**: `{KEY_NAME}`
+    *   **Action**:
+        *   If `KEY_NAME` corresponds to a non-modifier key (e.g., `ENTER`, `F1`), presses the HID keycode corresponding to that key. Generates `ACTION_COMP_TYPE_SPECIAL_KEY`. An HID report is sent.
+        *   If `KEY_NAME` corresponds to a modifier key (e.g., `LCTRL`, `LSHIFT`), presses the corresponding modifier. Generates `ACTION_COMP_TYPE_MOD_PRESS`. The internal modifier state is updated, and an HID report is sent immediately.
     *   **Purpose**: Accessing non-printable keys or keys not easily represented by single characters.
     *   **Simultaneous Press**: Can be concatenated without spaces with other `{KEY}` or `'keys'` components (e.g., `'c'{DEL}`, `{LCTRL}{LALT}{DEL}` - though `LC LA {DEL}` is preferred).
     *   **Examples**: `{ENTER}`, `{F1}`, `{LEFT}`, `{KP1}`.
 
 *   **Typing Sequence (`"`)**:
-    *   **Syntax**: `"string"` - One or more characters enclosed in double quotes.
+    *   **Syntax**: `"string"`
     *   **Action**: Simulates typing the string character by character. For each character (or embedded `{KEY}`): Press Key(s) -> Release Key(s) -> Default Delay.
     *   **Details**:
         *   **Case Sensitive**: Automatically handles Shift. `"A"` sends Shift+A (press/release), `"a"` sends A (press/release).
@@ -113,21 +117,30 @@ The `<ActionString>` defines the sequence of HID events generated when the butto
     *   **Purpose**: Sending pre-defined text snippets, commands, or multi-step shortcuts.
     *   **Examples**: `"Hello, World!"`, `"cd /home{ENTER}"`, `LC"kd"`.
 
-*   **Modifier Codes (Prefix)**:
+*   **Modifier Codes (Prefix OR Standalone Action)**:
     *   **Syntax**: `LC`, `LS`, `LA`, `LG`/`LM`, `RC`, `RS`, `RA`, `RG`/`RM` (see Appendix A).
-    *   **Action**: Placed immediately *before* a `'keys'`, `{KEY}`, or `"string"` component. Presses the corresponding modifier key(s).
-    *   **Persistence**: The modifier(s) remain pressed for subsequent sequential components in the same Press Sequence unless explicitly released or overridden (see Section 4.4).
-    *   **Purpose**: Applying modifiers like Shift, Ctrl, Alt, GUI to key presses or sequences.
-    *   **Examples**: `LS'a'` (Shift+A), `LC'c'` (Ctrl+C), `LA{F4}` (Alt+F4), `LG'r'` (Win+R), `LS"hello"` (types HELLO).
+    *   **Action (Dual Role)**:
+        1.  **As Prefix**: Placed immediately *before* a `'keys'`, `{KEY}`, or `"string"` component. Presses the corresponding modifier key(s) internally *before* the prefixed component executes. The modifier state is updated, but the HID report is sent by the prefixed component's action.
+        2.  **As Standalone Action**: If a modifier code appears *not* immediately followed by a component it can prefix (e.g., `LC LS`, `LC (100)`, `LC |`, or `LC` at the end of a sequence), it is treated as a distinct action. It generates `ACTION_COMP_TYPE_MOD_PRESS`, updates the internal modifier state, and sends an HID report immediately containing the current modifier state.
+    *   **Persistence**: When pressed (either as prefix or standalone), the modifier(s) remain active internally for subsequent sequential components in the same Press Sequence unless explicitly released (see Section 4.4).
+    *   **Purpose**: Applying modifiers like Shift, Ctrl, Alt, GUI to key presses or sequences (prefix role); explicitly setting or clearing modifier state and notifying the host immediately (standalone role).
+    *   **Examples**:
+        *   `LS'a'` (Prefix: Shift+A, report sent with 'a')
+        *   `LC'c'` (Prefix: Ctrl+C, report sent with 'c')
+        *   `LA{F4}` (Prefix: Alt+F4, report sent with F4)
+        *   `LG'r'` (Prefix: Win+R, report sent with 'r')
+        *   `LS"hello"` (Prefix: types HELLO, reports sent per char)
+        *   `LC` (Standalone: Press Left Ctrl, send report with LC modifier only)
+        *   `LC LS` (Standalone LC, delay, Standalone LS. Sends report for LC, then report for LC+LS)
 
 *   **Explicit Modifier Release (`\MOD`)**:
-    *   **Syntax**: `\LC`, `\LS`, `\LA`, `\LG`/`\LM`, `\RC`, `\RS`, `\RA`, `\RG`/`\RM`. A backslash followed by a modifier code.
-    *   **Action**: Releases the specified modifier key(s).
+    *   **Syntax**: `\LC`, `\LS`, `\LA`, `\LG`/`\LM`, `\RC`, `\RS`, `\RA`, `\RG`/`\RM`.
+    *   **Action**: Releases the specified modifier key(s). Generates `ACTION_COMP_TYPE_MOD_RELEASE`. The internal modifier state is updated, and an HID report is sent immediately.
     *   **Purpose**: To release a modifier mid-sequence, allowing subsequent actions without that modifier.
     *   **Example**: `LC'a' \LC 'b'` (Press Ctrl+A, release Ctrl, press B).
 
 *   **Explicit Delay (`(<ms>)`)**:
-    *   **Syntax**: `(<milliseconds>)` - An integer number of milliseconds enclosed in parentheses.
+    *   **Syntax**: `(<milliseconds>)`
     *   **Action**: Pauses execution for the specified duration. This pause occurs *after* the preceding component completes and *before* the next sequential component starts.
     *   **Details**: Overrides the default delay for this specific step in the sequence.
     *   **Purpose**: Introducing specific timing delays where needed (e.g., waiting for a UI element to appear).
@@ -188,17 +201,22 @@ How components are executed relative to each other.
 
 How modifier keys (Shift, Ctrl, Alt, GUI) behave in sequences.
 
-*   **Application**: A modifier code (`LC`, `LS`, etc.) applies its effect (pressing the modifier key) just before the *immediately following* action component (`'keys'`, `{KEY}`, or `"string"`).
-*   **Persistence Rule**: Once a modifier key is pressed via a modifier code prefix, it **remains held down** for any subsequent sequential components within the *same* `<Press Sequence>`, *unless* it is explicitly released with the corresponding `\MOD` component (e.g., `\LC`).
-*   **Implicit Release at End**: Modifiers still active when the `<Press Sequence>` and `<Release Sequence>` (if present) conclude are released (see Sections 4.2 and 4.5).
+*   **Application**: A modifier can be activated in several ways:
+    *   **Prefix**: `LC`, `LS`, etc., immediately before `'keys'`, `{KEY}`, or `"string"`. Updates internal state.
+    *   **Standalone Code**: `LC`, `LS`, etc., not acting as a prefix. Updates internal state and sends an immediate report.
+    *   **Special Key Name**: `{LCTRL}`, `{LSHIFT}`, etc. Updates internal state and sends an immediate report.
+*   **Execution**: When a modifier state changes (press via standalone code, `{NAME}`, or release via `\MOD`), the internal modifier state (`current_modifier_mask`) is updated, and an HID report reflecting the *new* state is sent immediately. When a modifier is applied as a prefix, the internal state is updated, but the report is sent by the subsequent key action.
+*   **Persistence Rule**: Once a modifier key is pressed (by any method), it **remains held down** internally for any subsequent sequential components within the *same* `<Press Sequence>`, *unless* it is explicitly released with the corresponding `\MOD` component (e.g., `\LC`).
+*   **Implicit Release at End**: Modifiers still active internally when the `<Press Sequence>` and `<Release Sequence>` (if present) conclude are released (see Sections 4.2 and 4.5).
 *   **Examples**:
-    *   `LS'a'` -> Press LS, Press a. (LS+a released at end).
-    *   `LS'a' 'b'` -> Press LS, Press a, (delay), Press b [LS still held]. (LS+a+b released at end).
-    *   `LS'a' \LS 'b'` -> Press LS, Press a, (delay), Release LS, (delay), Press b. (Only b released at end).
-    *   `LC'a' LS'b'` -> Press LC, Press a, (delay), Press LS, Press b [LC still held]. (LC+LS+a+b released at end).
-    *   `LC"kd"` -> Press LC, Type K, (delay), Type D, (delay), Release LC.
-    *   `LC"k" 'd'` -> Press LC, Type K, (delay), Press d. (d and LeftCtrl released at end).
-    *   `LC'k' 'd'` -> Press LC, Press K, (delay), Press D [LC and K still held]. (LC+K+D released at end).
+    *   `LS'a'` -> Press LS (internal), Press a (report: LS+a). (LS+a released at end).
+    *   `LS 'a'` -> Press LS (standalone, report: LS), (delay), Press a (report: LS+a). (LS+a released at end).
+    *   `LS'a' 'b'` -> Press LS (internal), Press a (report: LS+a), (delay), Press b (report: LS+a+b). (LS+a+b released at end).
+    *   `LS'a' \LS 'b'` -> Press LS (internal), Press a (report: LS+a), (delay), Release LS (report: a), (delay), Press b (report: a+b). (Only b released at end). *Correction: Report after \LS should just be 'a'.* -> **Correction:** Report after `\LS` should be just 'a' if 'a' is still held. If implicit release applies, it might be empty. Let's assume 'a' is held until end/explicit release. Report after `\LS` is `a`. Report after `'b'` is `a+b`.
+    *   `LC'a' LS'b'` -> Press LC (internal), Press a (report: LC+a), (delay), Press LS (internal), Press b (report: LC+LS+a+b). (LC+LS+a+b released at end).
+    *   `LC"kd"` -> Press LC (internal), Type K (report: LC+k press, delay, report: LC release), (delay), Type D (report: LC+d press, delay, report: LC release), (delay), Release LC (internal, no report needed here if string logic handles final release). *String logic needs careful implementation.*
+    *   `LC{LCTRL}` -> Press LC (internal), Press LCTRL (standalone, report: LC). No practical difference from just `LC`.
+    *   `LC LS 'a'` -> Press LC (standalone, report: LC), (delay), Press LS (standalone, report: LC+LS), (delay), Press a (report: LC+LS+a).
 
 ### 4.5. Explicit Release Sequence (`|` separator)
 
@@ -252,7 +270,7 @@ Provides fine-grained control over what happens upon release/toggle-off.
                 *   Change state to OFF, unhighlight button.
     *   **Layout Change (`G<file>`)**: If encountered during sequence execution, load the new layout file after the current component finishes.
         *   If Navigation (`G` prefix): Perform the Implicit Reset actions (release HID, reset toggles, clear remote mods) and then initiate loading of the specified `<file>` stored from the `<ActionString>`.
-        
+
 ## 6. Examples (v3.12 Syntax)
 
 *Assume a 5x4 grid and default delay of 50ms unless specified otherwise.*
@@ -331,24 +349,24 @@ Provides fine-grained control over what happens upon release/toggle-off.
     *   `G21MUtils⭾utils.cfg` (Auto 2x1, Medium font, Navigates to utils.cfg)
     *   `GJ$LEFT⭾numpad.cfg` (Auto 1x1, Jumbo font Left Arrow icon, Navigates to numpad.cfg)
 
-## Appendix A: Special Key Names (`{NAME}`) and Modifier Codes (Prefixes)
+## Appendix A: Special Key Names (`{NAME}`) and Modifier Codes (Prefixes/Standalone)
 
-**(Content remains the same as v3.7 - listing Modifier Codes and Special Key Names with Hex codes)**
+**(Content updated for v3.12 to match `hid_dev.h` constants)**
 
 **Modifier Codes (Prefixes & Release):**
 
-| Code | Modifier       | Release Code | Notes                                   |
-| :--- | :------------- | :----------- | :-------------------------------------- |
-| LC   | Left Control   | \LC          | Prefix applies, persists. `\` releases. |
-| LS   | Left Shift     | \LS          | Prefix applies, persists. `\` releases. |
-| LA   | Left Alt       | \LA          | Prefix applies, persists. `\` releases. |
-| LG   | Left GUI       | \LG          | Prefix applies, persists. `\` releases. |
-| LM   | Left Meta      | \LM          | (Alias for LG)                          |
-| RC   | Right Control  | \RC          | Prefix applies, persists. `\` releases. |
-| RS   | Right Shift    | \RS          | Prefix applies, persists. `\` releases. |
-| RA   | Right Alt      | \RA          | Prefix applies, persists. `\` releases. |
-| RG   | Right GUI      | \RG          | Prefix applies, persists. `\` releases. |
-| RM   | Right Meta     | \RM          | (Alias for RG)                          |
+| Code | Modifier       | Release Code | Hex Mask | Notes                                   |
+| :--- | :------------- | :----------- | :------- | :-------------------------------------- |
+| LC   | Left Control   | \LC          | 0x01     | Prefix applies, persists. `\` releases. |
+| LS   | Left Shift     | \LS          | 0x02     | Prefix applies, persists. `\` releases. |
+| LA   | Left Alt       | \LA          | 0x04     | Prefix applies, persists. `\` releases. |
+| LG   | Left GUI       | \LG          | 0x08     | Prefix applies, persists. `\` releases. |
+| LM   | Left Meta      | \LM          | 0x08     | (Alias for LG)                          |
+| RC   | Right Control  | \RC          | 0x10     | Prefix applies, persists. `\` releases. |
+| RS   | Right Shift    | \RS          | 0x20     | Prefix applies, persists. `\` releases. |
+| RA   | Right Alt      | \RA          | 0x40     | Prefix applies, persists. `\` releases. |
+| RG   | Right GUI      | \RG          | 0x80     | Prefix applies, persists. `\` releases. |
+| RM   | Right Meta     | \RM          | 0x80     | (Alias for RG)                          |
 
 **Special Key Names (`{NAME}`):** Represent pressing a specific non-character key.
 
@@ -416,7 +434,7 @@ Provides fine-grained control over what happens upon release/toggle-off.
 | {RALT}    | E6   | Right Alt (as key)      |
 | {RGUI}    | E7   | Right GUI (as key)      |
 
-*Note: Modifier codes (LC, LS etc.) act as prefixes affecting subsequent actions and persist. Special key names like {LCTRL}, {LSHIFT} represent pressing *that specific modifier key itself*, which might be needed in rare cases or for remapping.*
+*Note: Modifier codes (LC, LS etc.) can act as prefixes affecting subsequent actions OR as standalone actions that update the modifier state and send an immediate report. Special key names like {LCTRL}, {LSHIFT} also update the state and send an immediate report.*
 
 ## Appendix B: Icon Codes (`$<Name>`)
 
