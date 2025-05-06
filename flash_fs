@@ -1,0 +1,3 @@
+idf.py build
+parttool.py -p /dev/ttyACM0 write_partition -n storage --input build/storage.bin
+parttool.py -p /dev/ttyACM1 write_partition -n storage --input build/storage.bin

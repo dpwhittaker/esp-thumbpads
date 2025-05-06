@@ -9,7 +9,6 @@ dependencies:
     public: true
 
   esp_lcd_sh8601:
-    path: ../components/esp_lcd_sh8601
     version: '*'
     public: true
 

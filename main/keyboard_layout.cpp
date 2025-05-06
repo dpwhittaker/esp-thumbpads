@@ -637,7 +637,8 @@ bool create_keyboard_from_file(const char* filename) {
     lv_style_set_pad_all(&grid_style, 0);
     lv_style_set_border_width(&grid_style, 1);
     lv_style_set_outline_width(&grid_style, 1);
-    lv_style_set_bg_opa(&grid_style, LV_OPA_TRANSP);
+    lv_style_set_bg_color(&grid_style, lv_color_black());
+    lv_style_set_bg_opa(&grid_style, LV_OPA_COVER);
 
     lv_obj_t *grid = lv_obj_create(scr);
     lv_obj_set_size(grid, LV_PCT(100), LV_PCT(100));
@@ -664,10 +665,11 @@ bool create_keyboard_from_file(const char* filename) {
 
     static lv_style_t btn_style;
     lv_style_init(&btn_style);
-    lv_style_set_bg_color(&btn_style, lv_palette_main(LV_PALETTE_GREY));
+    lv_style_set_bg_color(&btn_style, lv_palette_darken(LV_PALETTE_GREY, 3));
     lv_style_set_bg_opa(&btn_style, LV_OPA_COVER);
-    lv_style_set_radius(&btn_style, 5);
+    lv_style_set_radius(&btn_style, 10);
     lv_style_set_pad_all(&btn_style, 2);
+    lv_style_set_shadow_width(&btn_style, 0);
 
     static lv_style_t btn_style_toggled;
     lv_style_init(&btn_style_toggled);

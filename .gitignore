@@ -1,3 +1,6 @@
 build
 components
 managed_components
+partition_table
+
+dependencies.lock.bak
