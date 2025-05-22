@@ -98,8 +98,6 @@ extern volatile bool sec_conn;
 extern uint16_t hid_conn_id;
 
 // Declared in esp_now_common.h
-extern volatile esp_now_pairing_status_t pairing_status;
-extern uint8_t peer_mac_address[ESP_NOW_ETH_ALEN];
 extern volatile uint8_t remote_modifier_mask;
 
 // --- Function Prototypes ---

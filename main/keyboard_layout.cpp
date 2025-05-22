@@ -22,6 +22,10 @@
 
 // --- Global Defaults ---
 #define DEFAULT_ACTION_DELAY_MS 50
+// Delays for string typing
+#define TYPING_KEY_EVENT_DELAY_MS 10 // Short delay for individual key event (e.g., shift down, key down, key up, shift up)
+#define INTER_CHAR_TYPING_DELAY_MS 20 // Delay between typing subsequent characters in a string
+
 
 // --- Global Variable Definitions ---
 // special_key_map and modifier_map are defined in hid_keycodes.h/cpp
@@ -129,6 +133,9 @@ static void parse_label_text(const char* label_src, std::vector<label_part_t>& p
                     current++;
                 }
             }
+        } else if (*current == ' ' && *(current + 1) == ' ') {
+            current_text_part += '\n';
+            while (*current == ' ') current++;
         } else { // Regular character
             current_text_part += *current;
             current++;
@@ -920,15 +927,13 @@ static void send_current_hid_report() {
 
 // Helper function to send the current modifier state via ESP-NOW
 static void send_esp_now_modifier_update() {
-    if (pairing_status == PAIRING_STATUS_DONE) {
-        esp_now_modifier_state_t current_state;
-        current_state.modifier_mask = current_modifier_mask; // Use the global mask
-        esp_err_t send_result = esp_now_send(peer_mac_address, (uint8_t *)&current_state, sizeof(current_state));
-        if (send_result != ESP_OK) {
-            ESP_LOGE(TAG, "ESP-NOW send error updating mods: %s", esp_err_to_name(send_result));
-        } else {
-            ESP_LOGD(TAG, "Sent ESP-NOW modifier update: 0x%02X", current_modifier_mask);
-        }
+    esp_now_modifier_state_t current_state;
+    current_state.modifier_mask = current_modifier_mask;
+    esp_err_t send_result = esp_now_send(broadcast_mac_address, (uint8_t *)&current_state, sizeof(current_state));
+    if (send_result != ESP_OK) {
+        ESP_LOGE(TAG, "ESP-NOW send error updating mods: %s", esp_err_to_name(send_result));
+    } else {
+        ESP_LOGD(TAG, "Sent ESP-NOW modifier update: 0x%02X", current_modifier_mask);
     }
 }
 
@@ -981,7 +986,68 @@ static sequence_result_t execute_action_sequence(const std::vector<action_compon
                  break;
 
             case ACTION_COMP_TYPE_STRING:
-                 ESP_LOGD(TAG, "  Comp: String '%s'", comp.data.string_data.str ? comp.data.string_data.str : "<null>");
+                 ESP_LOGD(TAG, "  Comp: String '%s'", comp.data.string_data.str ? comp.data.string_data.str : "<null_str>");
+                if (comp.data.string_data.str) {
+                    const char* str_to_type = comp.data.string_data.str;
+                    for (int i = 0; str_to_type[i] != '\0'; ++i) {
+                        char char_to_type = str_to_type[i];
+                        ESP_LOGD(TAG, "    Typing char: '%c'", char_to_type);
+
+                        key_mask_t original_persistent_mods = current_modifier_mask; // Global mods state before this char's events
+                        key_mask_t mods_for_this_char_event = original_persistent_mods; // Working copy for events of this char
+
+                        uint8_t base_keycode = get_hid_keycode_for_char(char_to_type);
+                        if (base_keycode == 0) {
+                            ESP_LOGW(TAG, "    Cannot type char '%c' (0x%02X), no HID keycode.", char_to_type, (unsigned char)char_to_type);
+                            vTaskDelay(pdMS_TO_TICKS(INTER_CHAR_TYPING_DELAY_MS)); // Still wait a bit before next char
+                            continue; // Skip to next character
+                        }
+
+                        // Determine if the character itself requires SHIFT (e.g., 'A' or '!')
+                        bool char_should_be_shifted = (isalpha(char_to_type) && isupper(char_to_type)) ||
+                                                      (strchr("!@#$%^&*()_+{}|:\"~<>?", char_to_type) != NULL);
+
+                        // Check current SHIFT state from persistent modifiers
+                        bool shift_is_currently_active_persistently = (original_persistent_mods & (LEFT_SHIFT_KEY_MASK | RIGHT_SHIFT_KEY_MASK)) != 0;
+                        
+                        // Does the effective shift state need to change for this character?
+                        bool need_to_toggle_shift_for_char = (char_should_be_shifted != shift_is_currently_active_persistently);
+
+                        if (need_to_toggle_shift_for_char) {
+                            if (char_should_be_shifted) { // Need to turn ON shift
+                                mods_for_this_char_event |= LEFT_SHIFT_KEY_MASK;
+                            } else { // Need to turn OFF shift
+                                mods_for_this_char_event &= ~(LEFT_SHIFT_KEY_MASK | RIGHT_SHIFT_KEY_MASK);
+                            }
+                            current_modifier_mask = mods_for_this_char_event; // Apply temporary shift change
+                            send_current_hid_report();
+                            vTaskDelay(pdMS_TO_TICKS(TYPING_KEY_EVENT_DELAY_MS));
+                        }
+                        // If no toggle needed, mods_for_this_char_event already reflects the correct persistent state
+
+                        // Press the base key (with potentially modified shift)
+                        add_held_key(base_keycode);
+                        current_modifier_mask = mods_for_this_char_event; // Ensure current_modifier_mask has the right shift state for this event
+                        send_current_hid_report();
+                        vTaskDelay(pdMS_TO_TICKS(TYPING_KEY_EVENT_DELAY_MS));
+
+                        // Release the base key
+                        remove_held_key(base_keycode);
+                        // current_modifier_mask (still mods_for_this_char_event) is correct for this event
+                        send_current_hid_report();
+                        vTaskDelay(pdMS_TO_TICKS(TYPING_KEY_EVENT_DELAY_MS));
+
+                        // Restore original persistent modifier state (current_modifier_mask)
+                        current_modifier_mask = original_persistent_mods;
+                        if (need_to_toggle_shift_for_char) { // If we had temporarily changed shift, send a report reflecting its restoration
+                            send_current_hid_report();
+                            vTaskDelay(pdMS_TO_TICKS(TYPING_KEY_EVENT_DELAY_MS));
+                        }
+                        // At this point, current_modifier_mask is back to original_persistent_mods
+
+                        vTaskDelay(pdMS_TO_TICKS(INTER_CHAR_TYPING_DELAY_MS));
+                    }
+                }
                  break;
 
             case ACTION_COMP_TYPE_KEYS_SIMULT:
@@ -1051,12 +1117,6 @@ void keyboard_event_cb(lv_event_t * e) {
                         }
                     }
                 }
-                if (pairing_status == PAIRING_STATUS_DONE) {
-                    esp_now_modifier_state_t zero_state = {0};
-                    esp_now_send(peer_mac_address, (uint8_t *)&zero_state, sizeof(zero_state));
-                    ESP_LOGI(TAG, "Sent ESP-NOW modifier reset (0x00)");
-                }
-
                 char* filename_copy = strdup(action->navigation_filename);
                 if (filename_copy) {
                     lv_event_send(lv_scr_act(), LV_EVENT_LOAD_LAYOUT, (void*)filename_copy);

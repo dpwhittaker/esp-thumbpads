@@ -4,6 +4,7 @@
 
 This document describes the configuration file format (v3.12) used to define keyboard layouts and actions for the ESP32 Thumbpad device. This format allows for defining button appearance (including font size and **icon codes**), grid layout (explicitly or automatically with optional sizing), and complex HID keyboard actions including **sequential character typing (`"string"`)**, **simultaneous key presses (`'keys'`)**, default and explicit delays using `(<ms>)` syntax, toggles, modifiers with defined persistence, explicit modifier release (`\MOD`), and explicit key release control (`|`).
 
+
 Note: Errors in the file are logged and the system immediately reloads the previous file. Users may be using the thumbpad to author a new file, so every attempt should be made to keep them in a working state. Suggested implementation: rename a working .cfg file to .bkp before replacing it, and rename it back to .cfg if parsing fails.
 
 **Key changes in v3.12:**
@@ -439,6 +440,7 @@ Provides fine-grained control over what happens upon release/toggle-off.
 ## Appendix B: Icon Codes (`$<Name>`)
 
 Icon codes provide access to a subset of FontAwesome icons built into the default LVGL fonts, corresponding to the `LV_STR_SYMBOL_...` definitions. Use these codes within the `<LabelText>` part of a button definition. The rendering engine will replace the code (e.g., `$OK`) with the corresponding icon glyph.
+
 
 **Parsing Rule:** When parsing `<LabelText>`, the system uses a **longest match** rule. It looks for the longest possible sequence starting with `$` that matches an Icon Code name defined below. Any characters immediately following the matched code are treated as literal text.
 

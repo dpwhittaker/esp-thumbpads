@@ -9,17 +9,10 @@ typedef struct {
     uint8_t modifier_mask;
 } esp_now_modifier_state_t;
 
-// Shared enum for ESP-NOW pairing status
-typedef enum {
-    PAIRING_STATUS_INIT,
-    PAIRING_STATUS_WAITING, // Broadcasting and listening
-    PAIRING_STATUS_DONE,
-    PAIRING_STATUS_FAIL
-} esp_now_pairing_status_t;
-
-// Extern declarations for global variables defined in thumbpads.cpp
-extern volatile esp_now_pairing_status_t pairing_status;
-extern uint8_t peer_mac_address[ESP_NOW_ETH_ALEN];
+// Extern declaration for remote modifier mask
 extern volatile uint8_t remote_modifier_mask;
+
+// Extern declaration for broadcast MAC
+extern const uint8_t broadcast_mac_address[ESP_NOW_ETH_ALEN];
 
 #endif // ESP_NOW_COMMON_H

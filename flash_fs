@@ -1,3 +1,75 @@
+set -eu
+
+# Check for required argument
+if [ "$#" -ne 1 ]; then
+    echo "Usage: $0 <fs|code>"
+    exit 1
+fi
+
+FLASH_TYPE="$1"
+
+# Run the build in a new tmux session.
+# The script will wait for this command to complete.
+# If idf.py build fails, tmux will exit with a non-zero status,
+# and 'set -e' will cause the script to terminate.
 idf.py build
-parttool.py -p /dev/ttyACM0 write_partition -n storage --input build/storage.bin
-parttool.py -p /dev/ttyACM1 write_partition -n storage --input build/storage.bin
+
+# If we reach here, the build was successful.
+echo "Build successful. Proceeding to flash and monitor."
+
+# Create a unique session name
+SESSION_NAME="esp_flash_monitor_$$"
+
+# Command for Pane 0 (/dev/ttyACM0)
+if [ "$FLASH_TYPE" = "fs" ]; then
+    CMD_PANE0="bash -c \"\
+    echo 'Pane 0: Flashing filesystem to /dev/ttyACM0...'; \
+    parttool.py -p /dev/ttyACM0 write_partition -n storage --input build/storage.bin && \
+    echo 'Pane 0: Flash /dev/ttyACM0 successful. Monitoring...'; \
+    idf.py -p /dev/ttyACM0 monitor || \
+    { echo 'Pane 0: ERROR - Flashing or monitoring /dev/ttyACM0 failed.'; read -p 'Press Enter to acknowledge and close this pane command.'; exit 1; }\""
+elif [ "$FLASH_TYPE" = "code" ]; then
+    CMD_PANE0="bash -c \"\
+    echo 'Pane 0: Flashing code to /dev/ttyACM0...'; \
+    idf.py -p /dev/ttyACM0 flash && \
+    echo 'Pane 0: Flash /dev/ttyACM0 successful. Monitoring...'; \
+    idf.py -p /dev/ttyACM0 monitor || \
+    { echo 'Pane 0: ERROR - Flashing or monitoring /dev/ttyACM0 failed.'; read -p 'Press Enter to acknowledge and close this pane command.'; exit 1; }\""
+else
+    echo "Invalid argument: $FLASH_TYPE. Use 'fs' or 'code'."
+    exit 1
+fi
+
+# Command for Pane 1 (/dev/ttyACM1)
+if [ "$FLASH_TYPE" = "fs" ]; then
+    CMD_PANE1="bash -c \"\
+    echo 'Pane 1: Flashing filesystem to /dev/ttyACM1...'; \
+    parttool.py -p /dev/ttyACM1 write_partition -n storage --input build/storage.bin && \
+    echo 'Pane 1: Flash /dev/ttyACM1 successful. Monitoring...'; \
+    idf.py -p /dev/ttyACM1 monitor || \
+    { echo 'Pane 1: ERROR - Flashing or monitoring /dev/ttyACM1 failed.'; read -p 'Press Enter to acknowledge and close this pane command.'; exit 1; }\""
+elif [ "$FLASH_TYPE" = "code" ]; then
+    CMD_PANE1="bash -c \"\
+    echo 'Pane 1: Flashing code to /dev/ttyACM1...'; \
+    idf.py -p /dev/ttyACM1 flash && \
+    echo 'Pane 1: Flash /dev/ttyACM1 successful. Monitoring...'; \
+    idf.py -p /dev/ttyACM1 monitor || \
+    { echo 'Pane 1: ERROR - Flashing or monitoring /dev/ttyACM1 failed.'; read -p 'Press Enter to acknowledge and close this pane command.'; exit 1; }\""
+fi
+
+# Create a new detached tmux session with the first pane's command
+echo "Creating tmux session '$SESSION_NAME' for flashing and monitoring..."
+tmux new-session -d -s "$SESSION_NAME" "$CMD_PANE0"
+
+# Split the window vertically for the second pane's command
+tmux split-window -v -t "$SESSION_NAME:0" "$CMD_PANE1"
+
+# Optional: Select a layout to make panes evenly sized
+tmux select-layout -t "$SESSION_NAME:0" even-horizontal
+
+# Attach to the newly created session
+echo "Attaching to tmux session '$SESSION_NAME'. Use Ctrl-b d to detach."
+tmux attach-session -t "$SESSION_NAME"
+
+echo "Exited tmux session. Script finished."
+
