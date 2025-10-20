@@ -64,6 +64,139 @@ static sequence_result_t execute_action_sequence(const std::vector<action_compon
 static bool load_layout_internal(const char* path_to_load, lv_obj_t* screen);
 static char* generate_backup_path(const char* current_path);
 static void send_esp_now_modifier_update(); // Forward declare the new helper
+static bool is_cheat_sheet_file(FILE* f); // Forward declare cheat sheet detection
+static bool parse_cheat_sheet_file(FILE* f, cheat_sheet_layout_t& layout); // Forward declare cheat sheet parsing
+static void render_cheat_sheet_quadrant(lv_obj_t* parent, const quadrant_t& quad, int x, int y, int w, int h); // Forward declare cheat sheet rendering
+static bool create_cheat_sheet_from_file(const char* filename); // Forward declare cheat sheet creation
+
+// --- Cheat Sheet Quadrant Support ---
+
+enum quadrant_type_t {
+    QUADRANT_TYPE_GRID,
+    QUADRANT_TYPE_GAMEPAD
+};
+
+struct quadrant_t {
+    quadrant_type_t type;
+    std::string header; // e.g. "TL", "TRGPR"
+    std::vector<std::string> lines;
+};
+
+struct cheat_sheet_layout_t {
+    std::map<std::string, quadrant_t> quadrants; // "TL", "TR", "BL", "BR"
+};
+
+// Detect if file is a cheat sheet (by quadrant header)
+static bool is_cheat_sheet_file(FILE* f) {
+    char line[64];
+    rewind(f);
+    while (fgets(line, sizeof(line), f)) {
+        char* p = line;
+        while (isspace((unsigned char)*p)) p++;
+        if (*p == '#' || *p == '\0') continue;
+        if ((strncmp(p, "TL", 2) == 0 || strncmp(p, "TR", 2) == 0 ||
+             strncmp(p, "BL", 2) == 0 || strncmp(p, "BR", 2) == 0) &&
+            (p[2] == '\0' || p[2] == '\n' || p[2] == 'G' || isdigit(p[2]))) {
+            return true;
+        }
+        break;
+    }
+    rewind(f);
+    return false;
+}
+
+// Parse cheat sheet file into quadrants
+static bool parse_cheat_sheet_file(FILE* f, cheat_sheet_layout_t& layout) {
+    rewind(f);
+    std::string current_header;
+    quadrant_t* current_quad = nullptr;
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        char* p = line;
+        while (isspace((unsigned char)*p)) p++;
+        if (*p == '#' || *p == '\0') continue;
+        if (strncmp(p, "---", 3) == 0) {
+            current_header.clear();
+            current_quad = nullptr;
+            continue;
+        }
+        if ((strncmp(p, "TL", 2) == 0 || strncmp(p, "TR", 2) == 0 ||
+             strncmp(p, "BL", 2) == 0 || strncmp(p, "BR", 2) == 0)) {
+            std::string header;
+            for (int i = 0; i < 6 && p[i] && !isspace((unsigned char)p[i]); ++i) header += p[i];
+            current_header = header;
+            quadrant_type_t qtype = (header.size() > 2 && (header[2] == 'G')) ? QUADRANT_TYPE_GAMEPAD : QUADRANT_TYPE_GRID;
+            layout.quadrants[header.substr(0,2)] = {qtype, header, {}};
+            current_quad = &layout.quadrants[header.substr(0,2)];
+            continue;
+        }
+        if (current_quad) {
+            current_quad->lines.push_back(std::string(p));
+        }
+    }
+    return !layout.quadrants.empty();
+}
+
+// Render a cheat sheet quadrant (simple version)
+static void render_cheat_sheet_quadrant(lv_obj_t* parent, const quadrant_t& quad, int x, int y, int w, int h) {
+    if (quad.type == QUADRANT_TYPE_GRID) {
+        // For grid: just show as a label (for now)
+        std::string text;
+        for (const auto& l : quad.lines) text += l;
+        lv_obj_t* label = lv_label_create(parent);
+        lv_label_set_text(label, text.c_str());
+        lv_obj_set_pos(label, x, y);
+        lv_obj_set_size(label, w, h);
+    } else if (quad.type == QUADRANT_TYPE_GAMEPAD) {
+        // For gamepad: parse ButtonName: Label lines and render in a fixed arrangement
+        int btn_w = w / 3, btn_h = h / 4, i = 0;
+        for (const auto& l : quad.lines) {
+            const char* p = l.c_str();
+            while (isspace((unsigned char)*p)) p++;
+            const char* colon = strchr(p, ':');
+            if (!colon) continue;
+            std::string btn_name(p, colon - p);
+            std::string label = colon + 1;
+            lv_obj_t* btn = lv_btn_create(parent);
+            lv_obj_set_size(btn, btn_w, btn_h);
+            lv_obj_set_pos(btn, x + (i%2)*btn_w, y + (i/2)*btn_h);
+            lv_obj_t* lbl = lv_label_create(btn);
+            lv_label_set_text(lbl, label.c_str());
+            lv_obj_center(lbl);
+            i++;
+        }
+    }
+}
+
+// Main: Create cheat sheet from file
+static bool create_cheat_sheet_from_file(const char* filename) {
+    lv_obj_t *scr = lv_scr_act();
+    FILE* f = fopen(filename, "r");
+    if (!f) return false;
+    cheat_sheet_layout_t layout;
+    if (!parse_cheat_sheet_file(f, layout)) {
+        fclose(f);
+        return false;
+    }
+    fclose(f);
+
+    // Divide screen into quadrants and render each
+    int scr_w = lv_obj_get_width(scr), scr_h = lv_obj_get_height(scr);
+    int half_w = scr_w / 2, half_h = scr_h / 2;
+    std::vector<std::pair<std::string, lv_area_t>> quads = {
+        {"TL", {0, 0, half_w, half_h}},
+        {"TR", {half_w, 0, half_w, half_h}},
+        {"BL", {0, half_h, half_w, half_h}},
+        {"BR", {half_w, half_h, half_w, half_h}}
+    };
+    for (const auto& q : quads) {
+        auto it = layout.quadrants.find(q.first);
+        if (it != layout.quadrants.end()) {
+            render_cheat_sheet_quadrant(scr, it->second, q.second.x1, q.second.y1, q.second.x2, q.second.y2);
+        }
+    }
+    return true;
+}
 
 // --- Keyboard Creation Helpers ---
 
@@ -585,12 +718,20 @@ static bool parse_action_string(const char* action_str, button_type_t btn_type,
     return true;
 }
 
-// New function to load layout from file
+// Update: create_keyboard_from_file to support cheat sheets
 bool create_keyboard_from_file(const char* filename) {
-    lv_obj_t *scr = lv_scr_act();
     FILE* f = fopen(filename, "r");
+    if (!f) return false;
+    bool is_cheat = is_cheat_sheet_file(f);
+    fclose(f);
+    if (is_cheat) {
+        return create_cheat_sheet_from_file(filename);
+    }
 
-    if (f == NULL) {
+    lv_obj_t *scr = lv_scr_act();
+    FILE* f_normal = fopen(filename, "r");
+
+    if (f_normal == NULL) {
         ESP_LOGE(TAG, "Failed to open keyboard layout file: %s (errno %d)", filename, errno);
         return false;
     }
@@ -600,9 +741,9 @@ bool create_keyboard_from_file(const char* filename) {
     int grid_cols = 0, grid_rows = 0;
     uint32_t file_default_delay = DEFAULT_ACTION_DELAY_MS;
     char first_line[64];
-    if (!fgets(first_line, sizeof(first_line), f)) {
+    if (!fgets(first_line, sizeof(first_line), f_normal)) {
         ESP_LOGE(TAG, "Failed to read first line from: %s", filename);
-        fclose(f);
+        fclose(f_normal);
         return false;
     }
 
@@ -611,7 +752,7 @@ bool create_keyboard_from_file(const char* filename) {
         n_scanned = sscanf(first_line, "%dx%d", &grid_cols, &grid_rows);
         if (n_scanned != 2) {
             ESP_LOGE(TAG, "Invalid grid dimensions format in first line: %s", first_line);
-            fclose(f);
+            fclose(f_normal);
             return false;
         }
         file_default_delay = DEFAULT_ACTION_DELAY_MS;
@@ -624,7 +765,7 @@ bool create_keyboard_from_file(const char* filename) {
 
     if (grid_cols <= 0 || grid_rows <= 0 || grid_cols > 10 || grid_rows > 10) {
         ESP_LOGE(TAG, "Invalid grid dimensions (%d x %d) in file: %s", grid_cols, grid_rows, filename);
-        fclose(f);
+        fclose(f_normal);
         return false;
     }
     current_layout_default_delay = file_default_delay;
@@ -633,7 +774,7 @@ bool create_keyboard_from_file(const char* filename) {
     grid_layout_state_t* layout_state = init_grid_state(grid_cols, grid_rows);
     if (!layout_state) {
         ESP_LOGE(TAG, "Failed to allocate grid layout state (%dx%d)", grid_cols, grid_rows);
-        fclose(f);
+        fclose(f_normal);
         return false;
     }
 
@@ -658,7 +799,7 @@ bool create_keyboard_from_file(const char* filename) {
 
     if (grid_cols > 10 || grid_rows > 10) {
         ESP_LOGE(TAG, "Grid dimensions (%dx%d) exceed static array limits (10x10). Max 10 allowed.", grid_cols, grid_rows);
-        fclose(f);
+        fclose(f_normal);
         free_grid_state(layout_state);
         return false;
     }
@@ -686,7 +827,7 @@ bool create_keyboard_from_file(const char* filename) {
     int line_num = 1;
     bool layout_ok = true;
 
-    while (fgets(line_buffer, sizeof(line_buffer), f)) {
+    while (fgets(line_buffer, sizeof(line_buffer), f_normal)) {
         line_num++;
         char* line_start = line_buffer;
 
@@ -844,7 +985,7 @@ bool create_keyboard_from_file(const char* filename) {
 
     }
 
-    fclose(f);
+    fclose(f_normal);
     free_grid_state(layout_state); // Free the layout tracker
 
     if (!layout_ok) {

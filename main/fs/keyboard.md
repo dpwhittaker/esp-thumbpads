@@ -4,7 +4,6 @@
 
 This document describes the configuration file format (v3.12) used to define keyboard layouts and actions for the ESP32 Thumbpad device. This format allows for defining button appearance (including font size and **icon codes**), grid layout (explicitly or automatically with optional sizing), and complex HID keyboard actions including **sequential character typing (`"string"`)**, **simultaneous key presses (`'keys'`)**, default and explicit delays using `(<ms>)` syntax, toggles, modifiers with defined persistence, explicit modifier release (`\MOD`), and explicit key release control (`|`).
 
-
 Note: Errors in the file are logged and the system immediately reloads the previous file. Users may be using the thumbpad to author a new file, so every attempt should be made to keep them in a working state. Suggested implementation: rename a working .cfg file to .bkp before replacing it, and rename it back to .cfg if parsing fails.
 
 **Key changes in v3.12:**
@@ -350,6 +349,83 @@ Provides fine-grained control over what happens upon release/toggle-off.
     *   `G21MUtils⭾utils.cfg` (Auto 2x1, Medium font, Navigates to utils.cfg)
     *   `GJ$LEFT⭾numpad.cfg` (Auto 1x1, Jumbo font Left Arrow icon, Navigates to numpad.cfg)
 
+## 7. Cheat Sheet Mode: Quadrant-Based Gamepad Layouts
+
+Cheat Sheet mode allows you to display a visual reference for your gamepad layout, so you can see what each button is supposed to do. This is especially useful for complex layouts or when sharing configurations.
+
+### 7.1. Quadrant Structure
+
+A cheat sheet is divided into four quadrants, each representing a region of the screen:
+
+- `TL` = Top Left
+- `TR` = Top Right
+- `BL` = Bottom Left
+- `BR` = Bottom Right
+
+Each quadrant starts with a header line:
+- `TL`, `TR`, `BL`, or `BR`
+- Optionally followed by a grid definition (e.g., `TL5x4`) or a gamepad layout code (`GPR` for Gamepad Right, `GPL` for Gamepad Left)
+
+Quadrants are separated by a line containing only `---`.
+
+### 7.2. Quadrant Content
+
+**Grid Quadrant:**  
+If the header is e.g. `TL5x4`, the quadrant uses the standard grid/button syntax as described in previous sections.
+
+**Gamepad Layout Quadrant:**  
+If the header is e.g. `TRGPR` or `BLGPL`, the quadrant mimics the physical layout of the right or left half of the gamepad.  
+- Each line in the quadrant is a button mapping in the form:  
+  `ButtonName: Label`  
+  Example:  
+  `A: Jump`  
+  `B: Back`  
+  `X: Reload`  
+  `Y: Inventory`  
+- The system draws LVGL buttons in the quadrant, arranged to match the physical button positions of the gamepad half.
+
+### 7.3. Example Cheat Sheet File
+
+```
+# Cheat sheet for MyGame
+TLGPL
+DPUp: S$UP  Up
+DPDown: S$DOWN  Down
+DPLeft: S$LEFT  Left
+DPRight: S$RIGHT  Right
+L1: M$OK  Sprint
+L2: L$AUDIO  Aim
+LS: JLS  Move/Look
+---
+TRGPR
+A: SA  Jump
+B: SB  Back
+X: MX  Reload
+Y: JY  Inventory
+R1: MR1  Fire
+R2: LR2  Throw
+RS: JRS  Camera
+---
+BL2x1
+SHelp⭾Show Help
+SMap⭾Show Map
+---
+BR2x1
+SMenu⭾Open Menu
+SQuit⭾Quit Game
+```
+
+### 7.4. Navigation
+
+Cheat sheets are accessed using the standard navigation system.  
+For example, a button in your main layout can have an action string like `Gcheatsheet.cfg` to open the cheat sheet.
+
+### 7.5. Notes
+
+- Quadrant headers must be at the start of a line and quadrants must be separated by `---`.
+- You can mix grid and gamepad layouts in different quadrants.
+- Button names for gamepad layouts should match the physical button labels for clarity.
+
 ## Appendix A: Special Key Names (`{NAME}`) and Modifier Codes (Prefixes/Standalone)
 
 **(Content updated for v3.12 to match `hid_dev.h` constants)**
@@ -440,7 +516,6 @@ Provides fine-grained control over what happens upon release/toggle-off.
 ## Appendix B: Icon Codes (`$<Name>`)
 
 Icon codes provide access to a subset of FontAwesome icons built into the default LVGL fonts, corresponding to the `LV_STR_SYMBOL_...` definitions. Use these codes within the `<LabelText>` part of a button definition. The rendering engine will replace the code (e.g., `$OK`) with the corresponding icon glyph.
-
 
 **Parsing Rule:** When parsing `<LabelText>`, the system uses a **longest match** rule. It looks for the longest possible sequence starting with `$` that matches an Icon Code name defined below. Any characters immediately following the matched code are treated as literal text.
 
